@@ -1,0 +1,16 @@
+[package]
+name = "egui-noodle"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "BSL-1.0"
+description = "Node-graph canvas for egui where the application owns the model and the widget is a pure view"
+repository = "https://github.com/Coollab-Art/egui-noodle"
+keywords = ["egui", "node-graph", "nodes", "gui"]
+categories = ["gui"]
+
+# Versions are pinned here, never inherited from a workspace: this crate must
+# build when cloned on its own. See AGENTS.md.
+[dependencies]
+egui = "0.36"
+rustc-hash = "2"
