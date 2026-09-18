@@ -50,3 +50,13 @@ A wire never connects a node to itself. Whether two pins are compatible beyond t
 | Gesture | Effect |
 | --- | --- |
 | Ctrl + drag (Cmd on macOS), starting on empty canvas or on a node | Draw a stroke; every wire it crosses is marked as you go and removed when you release |
+
+## Inserting a node into a wire
+
+| Gesture | Effect |
+| --- | --- |
+| Hover a wire, click its `+` | Ask the application for a node to splice into the wire at that point |
+| Drag a node onto a wire and release | Splice the node into the wire; the wire lights up while you hover it, and shows in the cut colour if the node has no pins to splice with |
+| While dragging: hold Alt | Move past wires without splicing |
+
+After an insert, the nodes downstream slide right to make room for the new one.

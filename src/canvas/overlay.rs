@@ -1,23 +1,36 @@
 //! What is painted over the nodes: selection outlines, the box-selection
-//! rectangle, snap guides, hover highlights, and the wire being dragged.
+//! rectangle, snap guides, hover highlights, the `+` on a hovered wire, the
+//! wire being dragged, and the cutting stroke.
 
 use super::{
-    CanvasStyle, GraphLayout, WireEndpoints, gestures::Gesture, gestures::Hovered, node_ui,
-    round_corners, route_wire,
+    CanvasStyle, GraphLayout, WireEndpoints,
+    gestures::{Gesture, Hovered, InsertTarget},
+    node_ui, round_corners, route_wire,
 };
-use crate::{AnyPin, NodeId};
-use egui::{Color32, CornerRadius, Painter, Rect, Shape, Stroke, StrokeKind, pos2};
+use crate::{AnyPin, NodeId, Wire};
+use egui::{Color32, CornerRadius, Painter, Rect, Shape, Stroke, StrokeKind, pos2, vec2};
 use std::collections::BTreeSet;
 
-pub(super) fn draw_overlay(
-    painter: &Painter,
-    layout: &GraphLayout,
-    selection: &BTreeSet<NodeId>,
-    gesture: &Gesture,
-    hovered: Hovered,
-    style: &CanvasStyle,
-    zoom: f32,
-) {
+pub(super) struct OverlayInput<'a> {
+    pub layout: &'a GraphLayout,
+    pub selection: &'a BTreeSet<NodeId>,
+    pub gesture: &'a Gesture,
+    pub hovered: Hovered,
+    /// The `+` on the hovered wire, and whether the pointer is on it.
+    pub insert_button: Option<(Rect, bool)>,
+    pub zoom: f32,
+}
+
+pub(super) fn draw_overlay(painter: &Painter, input: OverlayInput<'_>, style: &CanvasStyle) {
+    let OverlayInput {
+        layout,
+        selection,
+        gesture,
+        hovered,
+        insert_button,
+        zoom,
+    } = input;
+
     // Drawn on the node's own rect with the stroke centred on its edge: the
     // inner half covers the node's anti-aliased edge pixels, the outer half is
     // the visible halo, and there is no second shape to leave a gap at the
@@ -34,16 +47,35 @@ pub(super) fn draw_overlay(
         }
     }
 
-    if let Some(wire) = hovered.wire
-        && let Some(drawn) = layout.wires.iter().find(|drawn| drawn.wire == wire)
-    {
-        painter.add(Shape::line(
-            drawn.polyline.clone(),
-            Stroke::new(style.wire_width * 1.5, highlight(drawn.color)),
-        ));
+    if let Some(wire) = hovered.wire {
+        restroke_wire(painter, layout, wire, style, None);
     }
     if let Some(pin) = hovered.pin {
         draw_pin_highlight(painter, layout, pin, style);
+    }
+    if let Some((rect, pointer_on_it)) = insert_button {
+        let fill = if pointer_on_it {
+            highlight(style.insert_button_fill)
+        } else {
+            style.insert_button_fill
+        };
+        painter.circle_filled(rect.center(), rect.width() / 2.0, fill);
+        let arm = rect.width() * 0.28;
+        let stroke = Stroke::new((rect.width() * 0.12).max(1.0 / zoom), Color32::WHITE);
+        painter.line_segment(
+            [
+                rect.center() - vec2(arm, 0.0),
+                rect.center() + vec2(arm, 0.0),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                rect.center() - vec2(0.0, arm),
+                rect.center() + vec2(0.0, arm),
+            ],
+            stroke,
+        );
     }
 
     match gesture {
@@ -59,7 +91,10 @@ pub(super) fn draw_overlay(
             );
         }
         Gesture::DraggingNodes {
-            guide_x, guide_y, ..
+            guide_x,
+            guide_y,
+            insert_target,
+            ..
         } => {
             let stroke = screen_width(style.snap_guide_stroke, zoom);
             let viewport = layout.viewport;
@@ -75,15 +110,22 @@ pub(super) fn draw_overlay(
                     stroke,
                 );
             }
+            // The wire the node would go into - or, in the cut colour, the one
+            // it is over but cannot go into.
+            if let Some(InsertTarget { wire, valid }) = insert_target {
+                let color = (!valid).then_some(style.wire_cut_stroke.color);
+                restroke_wire(painter, layout, *wire, style, color);
+            }
         }
         Gesture::CuttingWires { stroke, crossed } => {
             for wire in crossed {
-                if let Some(drawn) = layout.wires.iter().find(|drawn| drawn.wire == *wire) {
-                    painter.add(Shape::line(
-                        drawn.polyline.clone(),
-                        Stroke::new(style.wire_width * 1.5, style.wire_cut_stroke.color),
-                    ));
-                }
+                restroke_wire(
+                    painter,
+                    layout,
+                    *wire,
+                    style,
+                    Some(style.wire_cut_stroke.color),
+                );
             }
             if stroke.len() >= 2 {
                 painter.add(Shape::line(
@@ -153,6 +195,26 @@ pub(super) fn draw_overlay(
                 draw_pin_highlight(painter, layout, target, style);
             }
         }
+    }
+}
+
+/// Draws a wire again, thicker: in a lighter shade of its own colour, or in
+/// `color` when given.
+fn restroke_wire(
+    painter: &Painter,
+    layout: &GraphLayout,
+    wire: Wire,
+    style: &CanvasStyle,
+    color: Option<Color32>,
+) {
+    if let Some(drawn) = layout.wires.iter().find(|drawn| drawn.wire == wire) {
+        painter.add(Shape::line(
+            drawn.polyline.clone(),
+            Stroke::new(
+                style.wire_width * 1.5,
+                color.unwrap_or_else(|| highlight(drawn.color)),
+            ),
+        ));
     }
 }
 

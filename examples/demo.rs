@@ -101,6 +101,27 @@ impl eframe::App for Demo {
                         .add_node(node("New", &["in", "amount"], &["out"]), *pos);
                     self.canvas.select_only(id);
                 }
+                // What an application's node menu would do: splice a new node
+                // into the wire, then let the nodes downstream make room.
+                CanvasEvent::WireInsertRequested { wire, pos } => {
+                    let size = self.style.default_node_size;
+                    let id = self
+                        .graph
+                        .add_node(node("New", &["in", "amount"], &["out"]), *pos - size / 2.0);
+                    let _ = self.graph.insert_into_wire(
+                        *wire,
+                        id,
+                        InputId(0),
+                        ConnectionPolicy::Single,
+                        OutputId(0),
+                    );
+                    self.canvas.make_room(id, wire.to.node);
+                    self.canvas.select_only(id);
+                }
+                CanvasEvent::NodeDroppedOnWire { wire, node, .. } => {
+                    self.graph.apply(event);
+                    self.canvas.make_room(*node, wire.to.node);
+                }
                 // What an application's node menu would do: complete the wire
                 // with a new node.
                 CanvasEvent::WireDropped { from, pos } => {

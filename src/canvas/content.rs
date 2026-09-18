@@ -38,6 +38,16 @@ pub trait NodeContent {
     fn output_row(&mut self, ui: &mut Ui, output: &OutputSpec) {
         ui.add(egui::Label::new(&output.label).selectable(false));
     }
+
+    /// The pins a node offers when spliced into a wire: the input the wire's
+    /// source will feed, and the output that will feed the wire's target.
+    /// `None` for a node that cannot sit on a wire. Defaults to the first of
+    /// each.
+    fn splice_pins(&mut self, node: &Self::Node) -> Option<(InputId, OutputId)> {
+        let input = self.inputs(node).first()?.id;
+        let output = self.outputs(node).first()?.id;
+        Some((input, output))
+    }
 }
 
 pub struct InputSpec {

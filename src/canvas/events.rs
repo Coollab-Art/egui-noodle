@@ -1,4 +1,4 @@
-use crate::{AnyPin, ConnectionPolicy, Graph, InPin, NodeId, OutPin, Wire};
+use crate::{AnyPin, ConnectionPolicy, Graph, InPin, InputId, NodeId, OutPin, OutputId, Wire};
 use egui::Pos2;
 
 /// What the user did on the canvas this frame. The canvas never changes the
@@ -6,7 +6,8 @@ use egui::Pos2;
 /// [`Graph::apply`], or by turning each into a command it can undo.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanvasEvent {
-    /// A drag ended. One event per drag, so one undo entry per drag.
+    /// A drag ended, or nodes finished sliding apart to make room. One event
+    /// per drag, so one undo entry per drag.
     NodesMoved { moves: Vec<NodeMove> },
     /// The delete key, with these nodes selected.
     DeleteRequested { nodes: Vec<NodeId> },
@@ -17,12 +18,25 @@ pub enum CanvasEvent {
         to: InPin,
         policy: ConnectionPolicy,
     },
-    /// A wire was picked up off its input and dropped elsewhere, or
+    /// A wire was picked up off its input and dropped elsewhere, cut, or
     /// right-clicked.
     DisconnectRequested { wire: Wire },
     /// A new wire, started on `from`, was released over empty canvas at this
     /// graph-space position - the application may offer a node to complete it.
     WireDropped { from: AnyPin, pos: Pos2 },
+    /// The `+` on a hovered wire was clicked - the application may offer a
+    /// node to splice in, placed around `pos`.
+    WireInsertRequested { wire: Wire, pos: Pos2 },
+    /// A node was dropped on a wire: splice it in, `input` fed by the wire's
+    /// source and `output` feeding the wire's target. Follows the
+    /// `NodesMoved` of the same drop.
+    NodeDroppedOnWire {
+        wire: Wire,
+        node: NodeId,
+        input: InputId,
+        input_policy: ConnectionPolicy,
+        output: OutputId,
+    },
     /// A secondary click on empty canvas, at this graph-space position. What
     /// to show is the application's business.
     ContextMenuRequested { pos: Pos2 },
@@ -37,8 +51,9 @@ pub struct NodeMove {
 
 impl<N> Graph<N> {
     /// The plain response to an event: move what moved, connect what was
-    /// connected, delete what was deleted. An application with undo builds
-    /// commands from the events instead of calling this.
+    /// connected, delete what was deleted, splice what was dropped on a wire.
+    /// An application with undo builds commands from the events instead of
+    /// calling this.
     pub fn apply(&mut self, event: &CanvasEvent) {
         match event {
             CanvasEvent::NodesMoved { moves } => {
@@ -59,7 +74,18 @@ impl<N> Graph<N> {
             CanvasEvent::DisconnectRequested { wire } => {
                 self.disconnect(*wire);
             }
-            CanvasEvent::WireDropped { .. } | CanvasEvent::ContextMenuRequested { .. } => {}
+            CanvasEvent::NodeDroppedOnWire {
+                wire,
+                node,
+                input,
+                input_policy,
+                output,
+            } => {
+                let _ = self.insert_into_wire(*wire, *node, *input, *input_policy, *output);
+            }
+            CanvasEvent::WireDropped { .. }
+            | CanvasEvent::WireInsertRequested { .. }
+            | CanvasEvent::ContextMenuRequested { .. } => {}
         }
     }
 }

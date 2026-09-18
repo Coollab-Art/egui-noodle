@@ -26,6 +26,9 @@ pub struct NodeLayout {
     pub header_rect: Rect,
     pub inputs: Vec<InputPinLayout>,
     pub outputs: Vec<OutputPinLayout>,
+    /// What `NodeContent::splice_pins` said: the pins this node would use if
+    /// dropped on a wire, or `None` if it cannot be.
+    pub splice_pins: Option<(InputId, OutputId)>,
     /// Off-screen: laid out from its last measured size, content not built.
     pub culled: bool,
 }
@@ -54,6 +57,17 @@ pub struct WireLayout {
     /// and cut.
     pub polyline: Vec<Pos2>,
     pub color: Color32,
+}
+
+impl WireLayout {
+    /// Where the wire's `+` sits: the middle of its longest run, which on a
+    /// forward wire is the horizontal bus into the target.
+    pub fn insert_point(&self) -> Option<Pos2> {
+        self.polyline
+            .windows(2)
+            .max_by(|a, b| a[0].distance_sq(a[1]).total_cmp(&b[0].distance_sq(b[1])))
+            .map(|segment| segment[0] + (segment[1] - segment[0]) / 2.0)
+    }
 }
 
 impl Default for GraphLayout {
@@ -199,6 +213,7 @@ mod tests {
             header_rect: Rect::NOTHING,
             inputs: vec![],
             outputs: vec![],
+            splice_pins: None,
             culled: false,
         }
     }

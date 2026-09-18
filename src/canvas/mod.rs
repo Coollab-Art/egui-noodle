@@ -22,8 +22,8 @@ pub use style::*;
 pub use view::*;
 pub use wires::*;
 
-use crate::{AnyPin, Graph, InPin, NodeId, OutPin};
-use egui::{LayerId, PointerButton, Rect, Sense, Shape, Stroke, Ui, UiBuilder, Vec2};
+use crate::{AnyPin, Graph, InPin, InputId, NodeId, OutPin, OutputId};
+use egui::{LayerId, PointerButton, Pos2, Rect, Sense, Shape, Stroke, Ui, UiBuilder, Vec2};
 use gestures::Gesture;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,6 +43,11 @@ pub struct Canvas {
     selection: BTreeSet<NodeId>,
     gesture: Gesture,
     hovered: Hovered,
+    /// A `make_room` waiting for the inserted node to have been measured.
+    pending_room: Option<PendingRoom>,
+    /// Nodes easing toward new positions after an insert. View-only until it
+    /// settles, when one `NodesMoved` reports where they ended up.
+    sliding: Option<Sliding>,
 }
 
 struct NodeMeasure {
@@ -50,6 +55,19 @@ struct NodeMeasure {
     /// Relative to the node's top-left.
     inputs: Vec<InputPinLayout>,
     outputs: Vec<OutputPinLayout>,
+    splice_pins: Option<(InputId, OutputId)>,
+}
+
+struct PendingRoom {
+    inserted: NodeId,
+    downstream: NodeId,
+}
+
+struct Sliding {
+    /// Where each node was in the graph when the slide began.
+    start: BTreeMap<NodeId, Pos2>,
+    target: BTreeMap<NodeId, Vec2>,
+    current: BTreeMap<NodeId, Vec2>,
 }
 
 pub struct CanvasResponse {
@@ -71,6 +89,9 @@ pub struct CanvasStats {
 /// How far past the panel a node may sit before its content is skipped.
 /// Generous, so a node half a screen away still animates in smoothly.
 const CULL_MARGIN: f32 = 200.0;
+
+/// Time constant of the slide-apart easing, in seconds.
+const SLIDE_TIME_CONSTANT: f32 = 0.08;
 
 impl Canvas {
     pub fn new() -> Self {
@@ -98,6 +119,19 @@ impl Canvas {
     /// What the pointer is over while nothing is being dragged.
     pub fn hovered(&self) -> Hovered {
         self.hovered
+    }
+
+    /// Slides the nodes downstream of `downstream` rightwards until `inserted`
+    /// no longer overhangs it, animated. Call it after splicing a node into a
+    /// wire, with the wire's target as `downstream`. Takes effect once the
+    /// inserted node has been drawn and measured - so it is fine to call the
+    /// frame the node is created. The moves are reported as one `NodesMoved`
+    /// when the slide settles.
+    pub fn make_room(&mut self, inserted: NodeId, downstream: NodeId) {
+        self.pending_room = Some(PendingRoom {
+            inserted,
+            downstream,
+        });
     }
 
     pub fn show<C: NodeContent>(
@@ -189,17 +223,30 @@ impl Canvas {
         let pointer = canvas_ui
             .input(|input| input.pointer.latest_pos())
             .map(|pointer| to_global.inverse() * pointer);
+        self.update_hovered(pointer, background.contains_pointer(), style);
+        let insert_button = self
+            .hovered
+            .wire
+            .and_then(|wire| self.insert_button_rect(wire, style))
+            .map(|rect| {
+                let response =
+                    canvas_ui.interact(rect, canvas_ui.id().with("insert_button"), Sense::click());
+                (rect, response)
+            });
+
         let mut events = Vec::new();
         self.handle_input(
             graph,
             &frames,
             &pins,
+            insert_button.as_ref(),
             &background,
             pointer,
             modifiers,
             style,
             &mut events,
         );
+        self.advance_slide(canvas_ui.ctx(), graph, &mut events);
 
         grid::draw_grid(
             canvas_ui.painter(),
@@ -267,6 +314,7 @@ impl Canvas {
                         .iter()
                         .map(|pin| pin.translated(origin))
                         .collect(),
+                    splice_pins: drawn.splice_pins,
                 },
             );
             layout.nodes.insert(
@@ -276,6 +324,7 @@ impl Canvas {
                     header_rect: drawn.header_rect,
                     inputs: drawn.inputs,
                     outputs: drawn.outputs,
+                    splice_pins: drawn.splice_pins,
                     culled: false,
                 },
             );
@@ -301,12 +350,17 @@ impl Canvas {
 
         overlay::draw_overlay(
             canvas_ui.painter(),
-            &layout,
-            &self.selection,
-            &self.gesture,
-            self.hovered,
+            overlay::OverlayInput {
+                layout: &layout,
+                selection: &self.selection,
+                gesture: &self.gesture,
+                hovered: self.hovered,
+                insert_button: insert_button
+                    .as_ref()
+                    .map(|(rect, response)| (*rect, response.hovered())),
+                zoom: self.view.zoom,
+            },
             style,
-            self.view.zoom,
         );
 
         // So a click or drag anywhere on the panel reaches the background.
@@ -318,6 +372,7 @@ impl Canvas {
             wires: layout.wires.len(),
         };
         self.layout = layout;
+        self.resolve_pending_room(graph, style);
         CanvasResponse { events, stats }
     }
 
@@ -417,10 +472,102 @@ impl Canvas {
             })
             .collect()
     }
+
+    /// Turns a pending `make_room` into a slide once the inserted node has a
+    /// rect to measure the overhang from. Runs after this frame's layout, so a
+    /// node created this frame is ready next frame.
+    fn resolve_pending_room<N>(&mut self, graph: &Graph<N>, style: &CanvasStyle) {
+        let Some(pending) = &self.pending_room else {
+            return;
+        };
+        if !graph.contains(pending.inserted) || !graph.contains(pending.downstream) {
+            self.pending_room = None;
+            return;
+        }
+        let (Some(inserted), Some(downstream)) = (
+            self.layout.nodes.get(&pending.inserted),
+            self.layout.nodes.get(&pending.downstream),
+        ) else {
+            return; // Not drawn yet; try again next frame.
+        };
+        let overhang = inserted.rect.right() + style.auto_offset_margin - downstream.rect.left();
+        let mut cone: BTreeSet<NodeId> = graph
+            .downstream_nodes(pending.downstream)
+            .into_iter()
+            .collect();
+        cone.insert(pending.downstream);
+        cone.remove(&pending.inserted);
+        if overhang > 0.0 && !cone.is_empty() {
+            let start: BTreeMap<NodeId, Pos2> = cone
+                .iter()
+                .filter_map(|id| Some((*id, graph.node(*id)?.pos)))
+                .collect();
+            self.sliding = Some(Sliding {
+                target: start
+                    .keys()
+                    .map(|id| (*id, Vec2::new(overhang, 0.0)))
+                    .collect(),
+                current: start.keys().map(|id| (*id, Vec2::ZERO)).collect(),
+                start,
+            });
+        }
+        self.pending_room = None;
+    }
+
+    /// Eases the sliding nodes toward their targets; when they arrive, reports
+    /// the moves and stops.
+    fn advance_slide<N>(
+        &mut self,
+        ctx: &egui::Context,
+        graph: &Graph<N>,
+        events: &mut Vec<CanvasEvent>,
+    ) {
+        let Some(sliding) = &mut self.sliding else {
+            return;
+        };
+        let delta_time = ctx.input(|input| input.stable_dt).min(0.1);
+        let blend = 1.0 - (-delta_time / SLIDE_TIME_CONSTANT).exp();
+        let mut settled = true;
+        for (id, current) in sliding.current.iter_mut() {
+            let target = sliding.target.get(id).copied().unwrap_or(Vec2::ZERO);
+            *current += (target - *current) * blend;
+            if (target - *current).length() > 0.5 {
+                settled = false;
+            }
+        }
+        if !settled {
+            ctx.request_repaint();
+            return;
+        }
+        let moves: Vec<NodeMove> = sliding
+            .start
+            .iter()
+            .filter(|(id, _)| graph.contains(**id))
+            .filter_map(|(id, from)| {
+                let to = *from + *sliding.target.get(id)?;
+                Some(NodeMove {
+                    id: *id,
+                    from: *from,
+                    to,
+                })
+            })
+            .collect();
+        if !moves.is_empty() {
+            events.push(CanvasEvent::NodesMoved { moves });
+        }
+        self.sliding = None;
+    }
+
+    pub(super) fn sliding_offset(&self, id: NodeId) -> Vec2 {
+        self.sliding
+            .as_ref()
+            .and_then(|sliding| sliding.current.get(&id).copied())
+            .unwrap_or(Vec2::ZERO)
+    }
 }
 
 impl NodeMeasure {
-    fn placed_at(&self, pos: egui::Pos2) -> NodeLayout {
+    fn placed_at(&self, pos: Pos2) -> NodeLayout {
         let offset = pos.to_vec2();
         NodeLayout {
             rect: Rect::from_min_size(pos, self.size),
@@ -436,6 +583,7 @@ impl NodeMeasure {
                 .iter()
                 .map(|pin| pin.translated(offset))
                 .collect(),
+            splice_pins: self.splice_pins,
             culled: true,
         }
     }

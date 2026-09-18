@@ -51,6 +51,13 @@ pub struct CanvasStyle {
     pub snap_to_grid: bool,
     /// Screen pixels, whatever the zoom.
     pub snap_guide_stroke: Stroke,
+
+    /// The `+` shown on a hovered wire, in graph units.
+    pub insert_button_size: f32,
+    pub insert_button_fill: Color32,
+    /// Graph units kept clear on either side of a node spliced into a wire,
+    /// when the nodes downstream slide apart to make room.
+    pub auto_offset_margin: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +101,10 @@ impl Default for CanvasStyle {
             snap_distance: 8.0,
             snap_to_grid: false,
             snap_guide_stroke: Stroke::new(1.0, Color32::from_rgb(255, 160, 60)),
+
+            insert_button_size: 14.0,
+            insert_button_fill: Color32::from_gray(90),
+            auto_offset_margin: 24.0,
         }
     }
 }

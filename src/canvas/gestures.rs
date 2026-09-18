@@ -1,6 +1,6 @@
-//! Selecting, dragging and deleting nodes, box selection, and dragging wires.
-//! The gesture in progress lives on the canvas; every effect on the graph
-//! leaves as a `CanvasEvent`.
+//! Selecting, dragging and deleting nodes, box selection, dragging wires,
+//! cutting wires, and dropping a node onto a wire. The gesture in progress
+//! lives on the canvas; every effect on the graph leaves as a `CanvasEvent`.
 
 use super::{
     Canvas, CanvasEvent, CanvasStyle, NodeMove, WireLayout, polyline_crosses_segment, snap,
@@ -27,6 +27,8 @@ pub(super) enum Gesture {
         targets: BTreeMap<NodeId, Pos2>,
         guide_x: Option<f32>,
         guide_y: Option<f32>,
+        /// The wire a single dragged node would be spliced into on release.
+        insert_target: Option<InsertTarget>,
     },
     BoxSelecting {
         start: Pos2,
@@ -50,6 +52,15 @@ pub(super) enum Gesture {
     },
 }
 
+/// The wire under a dragged node, and whether the node can go into it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct InsertTarget {
+    pub wire: Wire,
+    /// False when the node has no pins to splice with: the wire is shown as
+    /// refusing, and releasing does nothing.
+    pub valid: bool,
+}
+
 /// What is under the pointer while nothing is being dragged.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Hovered {
@@ -58,13 +69,15 @@ pub struct Hovered {
 }
 
 impl Canvas {
-    /// Reads this frame's responses - node frames, pins and the background -
-    /// updates the gesture and the selection, and reports what changed.
+    /// Reads this frame's responses - node frames, pins, the wire's `+` and
+    /// the background - updates the gesture and the selection, and reports
+    /// what changed.
     pub(super) fn handle_input<N>(
         &mut self,
         graph: &Graph<N>,
         frames: &[(NodeId, Response)],
         pins: &[(AnyPin, Response)],
+        insert_button: Option<&(Rect, Response)>,
         background: &Response,
         pointer: Option<Pos2>,
         modifiers: Modifiers,
@@ -112,6 +125,16 @@ impl Canvas {
             }
         }
 
+        if let Some((rect, response)) = insert_button
+            && response.clicked()
+            && let Some(wire) = self.hovered.wire
+        {
+            events.push(CanvasEvent::WireInsertRequested {
+                wire,
+                pos: rect.center(),
+            });
+        }
+
         // Taken out for the duration, so the arms can borrow the rest of `self`.
         let mut gesture = std::mem::take(&mut self.gesture);
         let mut finished = false;
@@ -124,6 +147,7 @@ impl Canvas {
                 targets,
                 guide_x,
                 guide_y,
+                insert_target,
             } => {
                 if let Some(pointer) = pointer {
                     for (id, offset) in grab.iter() {
@@ -143,6 +167,7 @@ impl Canvas {
                     }
                     *guide_x = snapped.guide_x;
                     *guide_y = snapped.guide_y;
+                    *insert_target = self.insert_target_under(pointer, targets, modifiers, style);
                 }
 
                 let handle_response = frames
@@ -164,6 +189,21 @@ impl Canvas {
                         .collect();
                     if !moves.is_empty() {
                         events.push(CanvasEvent::NodesMoved { moves });
+                    }
+                    if let Some(InsertTarget { wire, valid: true }) = insert_target
+                        && let Some((&node, _)) = targets.iter().next()
+                        && let Some(node_layout) = self.layout.nodes.get(&node)
+                        && let Some((input, output)) = node_layout.splice_pins
+                        && let Some(input_layout) =
+                            node_layout.inputs.iter().find(|pin| pin.id == input)
+                    {
+                        events.push(CanvasEvent::NodeDroppedOnWire {
+                            wire: *wire,
+                            node,
+                            input,
+                            input_policy: input_layout.policy,
+                            output,
+                        });
                     }
                     finished = true;
                 }
@@ -224,17 +264,6 @@ impl Canvas {
         }
         self.gesture = if finished { Gesture::Idle } else { gesture };
 
-        self.hovered = Hovered::default();
-        if matches!(self.gesture, Gesture::Idle)
-            && let Some(pointer) = pointer
-            && background.contains_pointer()
-        {
-            self.hovered.pin = self.layout.pin_at(pointer, style.pin_hit_expansion);
-            if self.hovered.pin.is_none() && self.layout.node_at(pointer).is_none() {
-                self.hovered.wire = self.layout.wire_at(pointer, style.wire_hit_slack);
-            }
-        }
-
         if background.drag_started_by(PointerButton::Primary)
             && let Some(pointer) = pointer
         {
@@ -276,6 +305,76 @@ impl Canvas {
                 nodes: self.selection.iter().copied().collect(),
             });
         }
+    }
+
+    /// What the pointer is over while nothing is being dragged, from where
+    /// everything was drawn last frame. A hovered wire stays hovered while the
+    /// pointer is on its `+`, which sits on the wire but is wider than it.
+    pub(super) fn update_hovered(
+        &mut self,
+        pointer: Option<Pos2>,
+        over_canvas: bool,
+        style: &CanvasStyle,
+    ) {
+        let previous_wire = self.hovered.wire;
+        self.hovered = Hovered::default();
+        if !matches!(self.gesture, Gesture::Idle) || !over_canvas {
+            return;
+        }
+        let Some(pointer) = pointer else {
+            return;
+        };
+        let on_previous_button = previous_wire.filter(|wire| {
+            self.insert_button_rect(*wire, style)
+                .is_some_and(|rect| rect.contains(pointer))
+        });
+        if on_previous_button.is_some() {
+            self.hovered.wire = on_previous_button;
+            return;
+        }
+        self.hovered.pin = self.layout.pin_at(pointer, style.pin_hit_expansion);
+        if self.hovered.pin.is_none() && self.layout.node_at(pointer).is_none() {
+            self.hovered.wire = self.layout.wire_at(pointer, style.wire_hit_slack);
+        }
+    }
+
+    /// Where a wire's `+` was drawn last frame.
+    pub(super) fn insert_button_rect(&self, wire: Wire, style: &CanvasStyle) -> Option<Rect> {
+        let center = self
+            .layout
+            .wires
+            .iter()
+            .find(|drawn| drawn.wire == wire)?
+            .insert_point()?;
+        Some(Rect::from_center_size(
+            center,
+            Vec2::splat(style.insert_button_size),
+        ))
+    }
+
+    /// The wire a dragged node is over, when exactly one node is dragged and
+    /// the alt modifier is not held down - alt is "move past this wire".
+    fn insert_target_under(
+        &self,
+        pointer: Pos2,
+        targets: &BTreeMap<NodeId, Pos2>,
+        modifiers: Modifiers,
+        style: &CanvasStyle,
+    ) -> Option<InsertTarget> {
+        if modifiers.alt || targets.len() != 1 {
+            return None;
+        }
+        let (&node, _) = targets.iter().next()?;
+        let wire = self
+            .layout
+            .wire_at(pointer, style.wire_hit_slack)
+            .filter(|wire| wire.from.node != node && wire.to.node != node)?;
+        let valid = self
+            .layout
+            .nodes
+            .get(&node)
+            .is_some_and(|layout| layout.splice_pins.is_some());
+        Some(InsertTarget { wire, valid })
     }
 
     /// What a wire drag becomes when it is released over `target`.
@@ -352,6 +451,7 @@ impl Canvas {
             grab,
             guide_x: None,
             guide_y: None,
+            insert_target: None,
         }
     }
 
@@ -390,17 +490,14 @@ impl Canvas {
     }
 
     /// Where a node is drawn this frame: its provisional position while it is
-    /// being dragged, its graph position otherwise.
+    /// being dragged, its graph position plus any sliding offset otherwise.
     pub(super) fn drawn_pos(&self, id: NodeId, graph_pos: Pos2) -> Pos2 {
-        match &self.gesture {
-            Gesture::DraggingNodes { targets, .. } => {
-                targets.get(&id).copied().unwrap_or(graph_pos)
-            }
-            Gesture::Idle
-            | Gesture::BoxSelecting { .. }
-            | Gesture::DraggingWire { .. }
-            | Gesture::CuttingWires { .. } => graph_pos,
+        if let Gesture::DraggingNodes { targets, .. } = &self.gesture
+            && let Some(target) = targets.get(&id)
+        {
+            return *target;
         }
+        graph_pos + self.sliding_offset(id)
     }
 
     pub(super) fn raise(&mut self, id: NodeId) {

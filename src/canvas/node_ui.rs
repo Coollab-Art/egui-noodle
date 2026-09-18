@@ -1,5 +1,5 @@
 use super::{CanvasStyle, InputPinLayout, NodeContent, OutputPinLayout, PinShape};
-use crate::NodeId;
+use crate::{InputId, NodeId, OutputId};
 use egui::{
     Align, Color32, CornerRadius, Frame, Layout, Rect, Shape, Stroke, TextWrapMode, Ui, UiBuilder,
     Vec2, pos2,
@@ -11,6 +11,7 @@ pub(super) struct DrawnNode {
     pub header_rect: Rect,
     pub inputs: Vec<InputPinLayout>,
     pub outputs: Vec<OutputPinLayout>,
+    pub splice_pins: Option<(InputId, OutputId)>,
 }
 
 /// Lays out and paints one node into `canvas_ui` (graph space), with its
@@ -32,6 +33,7 @@ pub(super) fn draw_node<C: NodeContent>(
 ) -> DrawnNode {
     let inputs = content.inputs(payload);
     let outputs = content.outputs(payload);
+    let splice_pins = content.splice_pins(payload);
 
     let max_rect = Rect::from_min_size(pos, known_size.unwrap_or(style.default_node_size));
     let mut builder = UiBuilder::new().max_rect(max_rect).id_salt(id);
@@ -131,6 +133,7 @@ pub(super) fn draw_node<C: NodeContent>(
         header_rect: header_band,
         inputs,
         outputs,
+        splice_pins,
     }
 }
 
