@@ -31,7 +31,7 @@ pub struct OutPin {
 }
 
 /// Either end of a wire.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AnyPin {
     In(InPin),
     Out(OutPin),
@@ -48,7 +48,7 @@ impl AnyPin {
 
 /// A connection from an output pin to an input pin. A wire has no identity
 /// beyond its two ends: this pair *is* the wire.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Wire {
     pub from: OutPin,
     pub to: InPin,

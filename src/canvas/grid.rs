@@ -1,7 +1,8 @@
+use super::screen_stroke;
 use egui::{Painter, Rect, Stroke, pos2};
 
 /// Grid lines over the visible part of graph space. `zoom` keeps the stroke
-/// one screen pixel wide whatever the view.
+/// its screen width whatever the view.
 pub(super) fn draw_grid(
     painter: &Painter,
     viewport: Rect,
@@ -12,7 +13,7 @@ pub(super) fn draw_grid(
     if spacing <= 0.0 || !viewport.is_finite() {
         return;
     }
-    let stroke = Stroke::new(stroke.width / zoom, stroke.color);
+    let stroke = screen_stroke(stroke, zoom);
 
     let first_column = (viewport.left() / spacing).floor() as i64;
     let last_column = (viewport.right() / spacing).ceil() as i64;

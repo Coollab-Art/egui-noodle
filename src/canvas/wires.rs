@@ -3,7 +3,8 @@
 //!
 //! Wires are orthogonal - horizontal, vertical, horizontal - with rounded
 //! corners. One polyline serves drawing, hit-testing and cutting alike, so
-//! what the user grabs is by construction what they see.
+//! what the user grabs is by construction what they see. See
+//! `post-mortems/3-Orthogonal Wires.md`.
 
 use egui::{Pos2, Rect, Vec2, pos2};
 
@@ -196,10 +197,11 @@ fn segments_intersect(a: Pos2, b: Pos2, c: Pos2, d: Pos2) -> bool {
     if straddles(side_of_cd_a, side_of_cd_b) && straddles(side_of_ab_c, side_of_ab_d) {
         return true;
     }
-    (side_of_cd_a == 0.0 && within_bounds(c, d, a))
-        || (side_of_cd_b == 0.0 && within_bounds(c, d, b))
-        || (side_of_ab_c == 0.0 && within_bounds(a, b, c))
-        || (side_of_ab_d == 0.0 && within_bounds(a, b, d))
+    // Collinear cases: an endpoint of one lies on the other.
+    (side_of_cd_a == 0.0 && Rect::from_two_pos(c, d).contains(a))
+        || (side_of_cd_b == 0.0 && Rect::from_two_pos(c, d).contains(b))
+        || (side_of_ab_c == 0.0 && Rect::from_two_pos(a, b).contains(c))
+        || (side_of_ab_d == 0.0 && Rect::from_two_pos(a, b).contains(d))
 }
 
 /// Which side of the line through `a` and `b` the point `c` lies on: positive,
@@ -208,15 +210,6 @@ fn orientation(a: Pos2, b: Pos2, c: Pos2) -> f32 {
     let ab = b - a;
     let ac = c - a;
     ab.x * ac.y - ab.y * ac.x
-}
-
-/// For a point already known to be collinear with `a`-`b`: whether it lies
-/// between them.
-fn within_bounds(a: Pos2, b: Pos2, point: Pos2) -> bool {
-    point.x >= a.x.min(b.x)
-        && point.x <= a.x.max(b.x)
-        && point.y >= a.y.min(b.y)
-        && point.y <= a.y.max(b.y)
 }
 
 #[cfg(test)]

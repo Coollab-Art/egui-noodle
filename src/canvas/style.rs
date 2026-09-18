@@ -1,5 +1,5 @@
 use super::WireRouting;
-use egui::{Color32, Margin, Rangef, Stroke, Vec2};
+use egui::{Color32, CornerRadius, Margin, Rangef, Stroke, Vec2};
 
 /// Everything about how a canvas looks. Plain fields, so an application
 /// builds one from its own theme.
@@ -64,6 +64,20 @@ pub struct CanvasStyle {
 pub enum PinShape {
     Circle,
     Square,
+}
+
+impl CanvasStyle {
+    /// The node frame's corners; the selection halo uses the same so the two
+    /// coincide exactly.
+    pub(super) fn corner_radius(&self) -> CornerRadius {
+        CornerRadius::same(self.node_rounding.round() as u8)
+    }
+}
+
+/// A stroke whose width is given in screen pixels, made `zoom`-independent
+/// for drawing in graph space.
+pub(super) fn screen_stroke(stroke: Stroke, zoom: f32) -> Stroke {
+    Stroke::new(stroke.width / zoom, stroke.color)
 }
 
 impl Default for CanvasStyle {

@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 ///
 /// Every mutation returns what its inverse needs, and none of them panics on a
 /// stale id, so an undo/redo layer can be built on top without the graph
-/// knowing about it.
+/// knowing about it. See `post-mortems/1-Application Owns the Model.md` and
+/// `2-Node and Wire Identity.md`.
 pub struct Graph<N> {
     /// Keyed by a monotonic id, so iteration is creation order and stable
     /// across runs - the compiled output must not depend on hash order.
@@ -208,10 +209,6 @@ impl<N> Graph<N> {
     /// In creation order.
     pub fn nodes(&self) -> impl Iterator<Item = (NodeId, &Node<N>)> {
         self.nodes.iter().map(|(id, node)| (*id, node))
-    }
-
-    pub fn node_count(&self) -> usize {
-        self.nodes.len()
     }
 
     /// In connection order.

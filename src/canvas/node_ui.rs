@@ -1,21 +1,12 @@
-use super::{CanvasStyle, InputPinLayout, NodeContent, OutputPinLayout, PinShape};
-use crate::{InputId, NodeId, OutputId};
+use super::{CanvasStyle, InputPinLayout, NodeContent, NodeLayout, OutputPinLayout, PinShape};
+use crate::NodeId;
 use egui::{
-    Align, Color32, CornerRadius, Frame, Layout, Rect, Shape, Stroke, TextWrapMode, Ui, UiBuilder,
-    Vec2, pos2,
+    Align, Color32, CornerRadius, Frame, Layout, Rect, Shape, TextWrapMode, Ui, UiBuilder, Vec2,
+    pos2,
 };
 
-/// A node's geometry once drawn. Pin rects are where the pins were painted.
-pub(super) struct DrawnNode {
-    pub rect: Rect,
-    pub header_rect: Rect,
-    pub inputs: Vec<InputPinLayout>,
-    pub outputs: Vec<OutputPinLayout>,
-    pub splice_pins: Option<(InputId, OutputId)>,
-}
-
 /// Lays out and paints one node into `canvas_ui` (graph space), with its
-/// top-left at `pos`.
+/// top-left at `pos`, and returns where everything landed.
 ///
 /// `known_size` is what the node measured last time; the frame it first
 /// appears it is laid out against `style.default_node_size` instead, as egui's
@@ -30,7 +21,7 @@ pub(super) fn draw_node<C: NodeContent>(
     payload: &mut C::Node,
     pos: egui::Pos2,
     known_size: Option<Vec2>,
-) -> DrawnNode {
+) -> NodeLayout {
     let inputs = content.inputs(payload);
     let outputs = content.outputs(payload);
     let splice_pins = content.splice_pins(payload);
@@ -46,21 +37,22 @@ pub(super) fn draw_node<C: NodeContent>(
     node_ui.style_mut().wrap_mode = Some(TextWrapMode::Extend);
 
     let header_fill_slot = node_ui.painter().add(Shape::Noop);
-    let mut header_rect = Rect::NOTHING;
+    let mut header_bottom = pos.y;
     let mut input_rows: Vec<Rect> = Vec::with_capacity(inputs.len());
     let mut output_rows: Vec<Rect> = Vec::with_capacity(outputs.len());
 
-    let rounding = CornerRadius::same(style.node_rounding.round() as u8);
+    let rounding = style.corner_radius();
     let frame = Frame::NONE
         .fill(style.node_fill)
         .stroke(style.node_stroke)
         .corner_radius(rounding)
         .show(&mut node_ui, |ui| {
-            header_rect = Frame::NONE
+            header_bottom = Frame::NONE
                 .inner_margin(style.header_padding)
                 .show(ui, |ui| content.header(ui, id, payload))
                 .response
-                .rect;
+                .rect
+                .bottom();
 
             Frame::NONE.inner_margin(style.node_padding).show(ui, |ui| {
                 ui.horizontal_top(|ui| {
@@ -83,11 +75,10 @@ pub(super) fn draw_node<C: NodeContent>(
     let rect = frame.response.rect;
 
     // Now that the node's width is known, the header fill can span it.
-    let header_band = Rect::from_min_max(rect.min, pos2(rect.max.x, header_rect.max.y));
     node_ui.painter().set(
         header_fill_slot,
         Shape::rect_filled(
-            header_band,
+            Rect::from_min_max(rect.min, pos2(rect.max.x, header_bottom)),
             CornerRadius {
                 nw: rounding.nw,
                 ne: rounding.ne,
@@ -128,23 +119,22 @@ pub(super) fn draw_node<C: NodeContent>(
         })
         .collect();
 
-    DrawnNode {
+    NodeLayout {
         rect,
-        header_rect: header_band,
         inputs,
         outputs,
         splice_pins,
+        culled: false,
     }
 }
 
 pub(super) fn draw_pin(painter: &egui::Painter, style: &CanvasStyle, rect: Rect, fill: Color32) {
-    let stroke: Stroke = style.pin_stroke;
     match style.pin_shape {
         PinShape::Circle => {
-            painter.circle(rect.center(), rect.width() / 2.0, fill, stroke);
+            painter.circle(rect.center(), rect.width() / 2.0, fill, style.pin_stroke);
         }
         PinShape::Square => {
-            painter.rect(rect, 0.0, fill, stroke, egui::StrokeKind::Middle);
+            painter.rect(rect, 0.0, fill, style.pin_stroke, egui::StrokeKind::Middle);
         }
     }
 }

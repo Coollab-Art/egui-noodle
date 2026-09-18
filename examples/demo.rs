@@ -96,18 +96,14 @@ impl eframe::App for Demo {
         for event in &response.events {
             match event {
                 CanvasEvent::ContextMenuRequested { pos } => {
-                    let id = self
-                        .graph
-                        .add_node(node("New", &["in", "amount"], &["out"]), *pos);
+                    let id = self.graph.add_node(new_node(), *pos);
                     self.canvas.select_only(id);
                 }
                 // What an application's node menu would do: splice a new node
                 // into the wire, then let the nodes downstream make room.
                 CanvasEvent::WireInsertRequested { wire, pos } => {
                     let size = self.style.default_node_size;
-                    let id = self
-                        .graph
-                        .add_node(node("New", &["in", "amount"], &["out"]), *pos - size / 2.0);
+                    let id = self.graph.add_node(new_node(), *pos - size / 2.0);
                     let _ = self.graph.insert_into_wire(
                         *wire,
                         id,
@@ -125,14 +121,12 @@ impl eframe::App for Demo {
                 // What an application's node menu would do: complete the wire
                 // with a new node.
                 CanvasEvent::WireDropped { from, pos } => {
-                    let id = self
-                        .graph
-                        .add_node(node("New", &["in", "amount"], &["out"]), *pos);
-                    let wire = match from {
+                    let id = self.graph.add_node(new_node(), *pos);
+                    let (from, to) = match from {
                         AnyPin::Out(from) => (*from, in_pin(id, 0)),
                         AnyPin::In(to) => (out_pin(id, 0), *to),
                     };
-                    let _ = self.graph.connect(wire.0, wire.1, ConnectionPolicy::Single);
+                    let _ = self.graph.connect(from, to, ConnectionPolicy::Single);
                     self.canvas.select_only(id);
                 }
                 other => self.graph.apply(other),
@@ -165,6 +159,11 @@ impl eframe::App for Demo {
             });
         ctx.request_repaint();
     }
+}
+
+/// What the demo adds on a right-click or to complete a wire.
+fn new_node() -> DemoNode {
+    node("New", &["in", "amount"], &["out"])
 }
 
 fn node(title: &str, inputs: &[&'static str], outputs: &[&'static str]) -> DemoNode {

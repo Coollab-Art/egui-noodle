@@ -5,10 +5,10 @@
 use super::{
     CanvasStyle, GraphLayout, WireEndpoints,
     gestures::{Gesture, Hovered, InsertTarget},
-    node_ui, round_corners, route_wire,
+    node_ui, round_corners, route_wire, screen_stroke,
 };
-use crate::{AnyPin, NodeId, Wire};
-use egui::{Color32, CornerRadius, Painter, Rect, Shape, Stroke, StrokeKind, pos2, vec2};
+use crate::{AnyPin, NodeId, OutPin, Wire};
+use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2};
 use std::collections::BTreeSet;
 
 pub(super) struct OverlayInput<'a> {
@@ -35,12 +35,11 @@ pub(super) fn draw_overlay(painter: &Painter, input: OverlayInput<'_>, style: &C
     // inner half covers the node's anti-aliased edge pixels, the outer half is
     // the visible halo, and there is no second shape to leave a gap at the
     // rounded corners.
-    let rounding = CornerRadius::same(style.node_rounding.round() as u8);
     for id in selection {
         if let Some(node) = layout.nodes.get(id) {
             painter.rect_stroke(
                 node.rect,
-                rounding,
+                style.corner_radius(),
                 style.selection_stroke,
                 StrokeKind::Middle,
             );
@@ -54,28 +53,7 @@ pub(super) fn draw_overlay(painter: &Painter, input: OverlayInput<'_>, style: &C
         draw_pin_highlight(painter, layout, pin, style);
     }
     if let Some((rect, pointer_on_it)) = insert_button {
-        let fill = if pointer_on_it {
-            highlight(style.insert_button_fill)
-        } else {
-            style.insert_button_fill
-        };
-        painter.circle_filled(rect.center(), rect.width() / 2.0, fill);
-        let arm = rect.width() * 0.28;
-        let stroke = Stroke::new((rect.width() * 0.12).max(1.0 / zoom), Color32::WHITE);
-        painter.line_segment(
-            [
-                rect.center() - vec2(arm, 0.0),
-                rect.center() + vec2(arm, 0.0),
-            ],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                rect.center() - vec2(0.0, arm),
-                rect.center() + vec2(0.0, arm),
-            ],
-            stroke,
-        );
+        draw_insert_button(painter, rect, pointer_on_it, style, zoom);
     }
 
     match gesture {
@@ -86,7 +64,7 @@ pub(super) fn draw_overlay(painter: &Painter, input: OverlayInput<'_>, style: &C
             painter.rect_stroke(
                 rect,
                 0.0,
-                screen_width(style.box_select_stroke, zoom),
+                screen_stroke(style.box_select_stroke, zoom),
                 StrokeKind::Middle,
             );
         }
@@ -96,7 +74,7 @@ pub(super) fn draw_overlay(painter: &Painter, input: OverlayInput<'_>, style: &C
             insert_target,
             ..
         } => {
-            let stroke = screen_width(style.snap_guide_stroke, zoom);
+            let stroke = screen_stroke(style.snap_guide_stroke, zoom);
             let viewport = layout.viewport;
             if let Some(x) = guide_x {
                 painter.line_segment(
@@ -130,7 +108,7 @@ pub(super) fn draw_overlay(painter: &Painter, input: OverlayInput<'_>, style: &C
             if stroke.len() >= 2 {
                 painter.add(Shape::line(
                     stroke.clone(),
-                    screen_width(style.wire_cut_stroke, zoom),
+                    screen_stroke(style.wire_cut_stroke, zoom),
                 ));
             }
         }
@@ -140,53 +118,44 @@ pub(super) fn draw_overlay(painter: &Painter, input: OverlayInput<'_>, style: &C
             current,
         } => {
             let color = layout.pin_color(*origin).unwrap_or(Color32::GRAY);
-            let loose_end = Rect::from_center_size(*current, egui::Vec2::ZERO);
-            let tolerance = style.wire_tolerance / zoom;
             let draw = |ends: WireEndpoints| {
                 let route = route_wire(&ends, &style.wire_routing, 0.0);
                 painter.add(Shape::line(
-                    round_corners(&route, style.wire_routing.corner_radius, tolerance),
+                    round_corners(
+                        &route,
+                        style.wire_routing.corner_radius,
+                        style.wire_tolerance / zoom,
+                    ),
                     Stroke::new(style.wire_width, color),
                 ));
             };
-            if detached.is_empty() {
-                match origin {
-                    AnyPin::Out(from) => {
-                        if let (Some(pin), Some(node)) =
-                            (layout.output(*from), layout.nodes.get(&from.node))
-                        {
-                            draw(WireEndpoints {
-                                from: pin.rect.center(),
-                                to: *current,
-                                from_node: node.rect,
-                                to_node: loose_end,
-                            });
-                        }
-                    }
-                    AnyPin::In(to) => {
-                        if let (Some(pin), Some(node)) =
-                            (layout.input(*to), layout.nodes.get(&to.node))
-                        {
-                            draw(WireEndpoints {
-                                from: *current,
-                                to: pin.rect.center(),
-                                from_node: loose_end,
-                                to_node: node.rect,
-                            });
-                        }
-                    }
-                }
-            } else {
-                for wire in detached {
-                    if let (Some(pin), Some(node)) =
-                        (layout.output(wire.from), layout.nodes.get(&wire.from.node))
+            match (origin, detached.is_empty()) {
+                // A new wire pulled from an input runs backwards, toward a
+                // source still to be chosen.
+                (AnyPin::In(to), true) => {
+                    if let (Some(pin), Some(node)) = (layout.input(*to), layout.nodes.get(&to.node))
                     {
                         draw(WireEndpoints {
-                            from: pin.rect.center(),
-                            to: *current,
-                            from_node: node.rect,
-                            to_node: loose_end,
+                            from: *current,
+                            to: pin.rect.center(),
+                            from_node: Rect::from_pos(*current),
+                            to_node: node.rect,
                         });
+                    }
+                }
+                // A new wire from an output, or picked-up wires whose output
+                // ends stay put: every one runs from its output to the pointer.
+                (AnyPin::Out(from), true) => {
+                    if let Some(ends) = ends_from_output(layout, *from, *current) {
+                        draw(ends);
+                    }
+                }
+                (_, false) => {
+                    for ends in detached
+                        .iter()
+                        .filter_map(|wire| ends_from_output(layout, wire.from, *current))
+                    {
+                        draw(ends);
                     }
                 }
             }
@@ -198,6 +167,47 @@ pub(super) fn draw_overlay(painter: &Painter, input: OverlayInput<'_>, style: &C
     }
 }
 
+/// A wire from `from` to a loose end at `loose_end`, ready to route.
+fn ends_from_output(layout: &GraphLayout, from: OutPin, loose_end: Pos2) -> Option<WireEndpoints> {
+    Some(WireEndpoints {
+        from: layout.output(from)?.rect.center(),
+        to: loose_end,
+        from_node: layout.nodes.get(&from.node)?.rect,
+        to_node: Rect::from_pos(loose_end),
+    })
+}
+
+fn draw_insert_button(
+    painter: &Painter,
+    rect: Rect,
+    pointer_on_it: bool,
+    style: &CanvasStyle,
+    zoom: f32,
+) {
+    let fill = if pointer_on_it {
+        highlight(style.insert_button_fill)
+    } else {
+        style.insert_button_fill
+    };
+    painter.circle_filled(rect.center(), rect.width() / 2.0, fill);
+    let arm = rect.width() * 0.28;
+    let stroke = Stroke::new((rect.width() * 0.12).max(1.0 / zoom), Color32::WHITE);
+    painter.line_segment(
+        [
+            rect.center() - vec2(arm, 0.0),
+            rect.center() + vec2(arm, 0.0),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            rect.center() - vec2(0.0, arm),
+            rect.center() + vec2(0.0, arm),
+        ],
+        stroke,
+    );
+}
+
 /// Draws a wire again, thicker: in a lighter shade of its own colour, or in
 /// `color` when given.
 fn restroke_wire(
@@ -207,7 +217,7 @@ fn restroke_wire(
     style: &CanvasStyle,
     color: Option<Color32>,
 ) {
-    if let Some(drawn) = layout.wires.iter().find(|drawn| drawn.wire == wire) {
+    if let Some(drawn) = layout.wire(wire) {
         painter.add(Shape::line(
             drawn.polyline.clone(),
             Stroke::new(
@@ -231,9 +241,4 @@ fn draw_pin_highlight(painter: &Painter, layout: &GraphLayout, pin: AnyPin, styl
 
 fn highlight(color: Color32) -> Color32 {
     color.lerp_to_gamma(Color32::WHITE, 0.35)
-}
-
-/// A stroke `zoom`-adjusted to keep its width in screen pixels.
-fn screen_width(stroke: Stroke, zoom: f32) -> Stroke {
-    Stroke::new(stroke.width / zoom, stroke.color)
 }

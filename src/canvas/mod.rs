@@ -1,6 +1,6 @@
 //! The canvas: draws a `Graph` and reports what the user did to it. It owns
 //! only view state - pan, zoom, selection, the gesture in progress, and what
-//! it measured last frame - never the graph.
+//! it drew last frame - never the graph.
 
 mod content;
 mod events;
@@ -22,9 +22,11 @@ pub use style::*;
 pub use view::*;
 pub use wires::*;
 
-use crate::{AnyPin, Graph, InPin, InputId, NodeId, OutPin, OutputId};
-use egui::{LayerId, PointerButton, Pos2, Rect, Sense, Shape, Stroke, Ui, UiBuilder, Vec2};
-use gestures::Gesture;
+use crate::{AnyPin, Graph, NodeId};
+use egui::{
+    LayerId, PointerButton, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, UiBuilder, Vec2,
+};
+use gestures::{Gesture, Interactors};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One node-graph view. Keep it across frames; hand it the graph each frame.
@@ -32,42 +34,34 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct Canvas {
     pub view: ViewState,
     /// What was drawn last frame. Gestures and application hit-testing read
-    /// this, one frame behind.
+    /// this, one frame behind; it is also where an off-screen node's geometry
+    /// comes from when its content is not built.
     layout: GraphLayout,
     /// Back to front. Nodes the graph gained are appended on top; nodes it
     /// lost are dropped.
     draw_order: Vec<NodeId>,
-    /// Each node's size and pin placement the last time it was built, so an
-    /// off-screen node can be laid out without building its content.
-    measures: BTreeMap<NodeId, NodeMeasure>,
+    /// The graph's topology revision `draw_order` was last synced against.
+    synced_topology: Option<u64>,
     selection: BTreeSet<NodeId>,
     gesture: Gesture,
     hovered: Hovered,
-    /// A `make_room` waiting for the inserted node to have been measured.
-    pending_room: Option<PendingRoom>,
-    /// Nodes easing toward new positions after an insert. View-only until it
-    /// settles, when one `NodesMoved` reports where they ended up.
-    sliding: Option<Sliding>,
+    room: Option<Room>,
 }
 
-struct NodeMeasure {
-    size: Vec2,
-    /// Relative to the node's top-left.
-    inputs: Vec<InputPinLayout>,
-    outputs: Vec<OutputPinLayout>,
-    splice_pins: Option<(InputId, OutputId)>,
-}
-
-struct PendingRoom {
-    inserted: NodeId,
-    downstream: NodeId,
-}
-
-struct Sliding {
-    /// Where each node was in the graph when the slide began.
-    start: BTreeMap<NodeId, Pos2>,
-    target: BTreeMap<NodeId, Vec2>,
-    current: BTreeMap<NodeId, Vec2>,
+/// The slide-apart after a node is spliced into a wire, from `make_room` until
+/// the nodes have settled.
+enum Room {
+    /// The inserted node has not been drawn yet, so its size is unknown.
+    Waiting {
+        inserted: NodeId,
+        downstream: NodeId,
+    },
+    Sliding {
+        /// Where each sliding node is in the graph.
+        start: BTreeMap<NodeId, Pos2>,
+        target: Vec2,
+        current: Vec2,
+    },
 }
 
 pub struct CanvasResponse {
@@ -90,8 +84,9 @@ pub struct CanvasStats {
 /// Generous, so a node half a screen away still animates in smoothly.
 const CULL_MARGIN: f32 = 200.0;
 
-/// Time constant of the slide-apart easing, in seconds.
-const SLIDE_TIME_CONSTANT: f32 = 0.08;
+/// The slide-apart covers this fraction of the remaining distance in this
+/// many seconds.
+const SLIDE_REACH: (f32, f32) = (0.9, 0.2);
 
 impl Canvas {
     pub fn new() -> Self {
@@ -128,7 +123,7 @@ impl Canvas {
     /// frame the node is created. The moves are reported as one `NodesMoved`
     /// when the slide settles.
     pub fn make_room(&mut self, inserted: NodeId, downstream: NodeId) {
-        self.pending_room = Some(PendingRoom {
+        self.room = Some(Room::Waiting {
             inserted,
             downstream,
         });
@@ -164,62 +159,8 @@ impl Canvas {
 
         self.sync_draw_order(graph);
 
-        // Interaction first, from where everything was drawn last frame - in
-        // phase with egui, which hit-tests against last frame's rects too.
-        // Node frames are registered before any content, so a widget inside a
-        // node wins the tie and a slider stays a slider; pins come after the
-        // frames, so they win the node's edge. Under the command modifier a
-        // frame only senses clicks: click toggles the selection, while a drag
-        // falls through to the background.
         let modifiers = canvas_ui.input(|input| input.modifiers);
-        let frame_sense = if modifiers.command {
-            Sense::click()
-        } else {
-            Sense::click_and_drag()
-        };
-        let frames: Vec<(NodeId, egui::Response)> = self
-            .draw_order
-            .iter()
-            .filter(|id| graph.contains(**id))
-            .filter_map(|id| {
-                let rect = self.layout.nodes.get(id)?.rect;
-                let response =
-                    canvas_ui.interact(rect, canvas_ui.id().with(("frame", id)), frame_sense);
-                Some((*id, response))
-            })
-            .collect();
-        let mut pins: Vec<(AnyPin, egui::Response)> = Vec::new();
-        for (id, node) in &self.layout.nodes {
-            if !graph.contains(*id) {
-                continue;
-            }
-            let inputs = node.inputs.iter().map(|pin| {
-                (
-                    AnyPin::In(InPin {
-                        node: *id,
-                        input: pin.id,
-                    }),
-                    pin.rect,
-                )
-            });
-            let outputs = node.outputs.iter().map(|pin| {
-                (
-                    AnyPin::Out(OutPin {
-                        node: *id,
-                        output: pin.id,
-                    }),
-                    pin.rect,
-                )
-            });
-            for (pin, rect) in inputs.chain(outputs) {
-                let response = canvas_ui.interact(
-                    rect.expand(style.pin_hit_expansion),
-                    canvas_ui.id().with(("pin", pin)),
-                    Sense::click_and_drag(),
-                );
-                pins.push((pin, response));
-            }
-        }
+        let (frames, pins) = self.register_interactors(&mut canvas_ui, graph, modifiers, style);
         let pointer = canvas_ui
             .input(|input| input.pointer.latest_pos())
             .map(|pointer| to_global.inverse() * pointer);
@@ -227,7 +168,11 @@ impl Canvas {
         let insert_button = self
             .hovered
             .wire
-            .and_then(|wire| self.insert_button_rect(wire, style))
+            .and_then(|wire| {
+                self.layout
+                    .wire(wire)?
+                    .insert_button_rect(style.insert_button_size)
+            })
             .map(|rect| {
                 let response =
                     canvas_ui.interact(rect, canvas_ui.id().with("insert_button"), Sense::click());
@@ -237,12 +182,14 @@ impl Canvas {
         let mut events = Vec::new();
         self.handle_input(
             graph,
-            &frames,
-            &pins,
-            insert_button.as_ref(),
-            &background,
-            pointer,
-            modifiers,
+            gestures::Interaction {
+                frames: &frames,
+                pins: &pins,
+                insert_button: insert_button.as_ref(),
+                background: &background,
+                pointer,
+                modifiers,
+            },
             style,
             &mut events,
         );
@@ -259,84 +206,12 @@ impl Canvas {
         // slot is reserved now and filled once the nodes are drawn.
         let wires_slot = canvas_ui.painter().add(Shape::Noop);
 
-        let mut layout = GraphLayout {
-            to_global,
-            panel_rect,
-            viewport,
-            nodes: BTreeMap::new(),
-            draw_order: self.draw_order.clone(),
-            wires: Vec::new(),
-        };
-        let cull_bounds = viewport.expand(CULL_MARGIN);
-        let mut culled = 0;
-        for id in &self.draw_order {
-            let Some(node) = graph.node_mut(*id) else {
-                continue;
-            };
-            let pos = self.drawn_pos(*id, node.pos);
-            let measure = self.measures.get(id);
-            if let Some(measure) = measure
-                && !Rect::from_min_size(pos, measure.size).intersects(cull_bounds)
-            {
-                layout.nodes.insert(*id, measure.placed_at(pos));
-                culled += 1;
-                continue;
-            }
-
-            let drawn = node_ui::draw_node(
-                &mut canvas_ui,
-                style,
-                content,
-                *id,
-                &mut node.payload,
-                pos,
-                measure.map(|measure| measure.size),
-            );
-            if measure.is_none() {
-                // Laid out against a placeholder size: do the frame again with
-                // the real one before anyone sees it.
-                canvas_ui
-                    .ctx()
-                    .request_discard("egui-noodle: first layout of a node");
-            }
-            let origin = -drawn.rect.min.to_vec2();
-            self.measures.insert(
-                *id,
-                NodeMeasure {
-                    size: drawn.rect.size(),
-                    inputs: drawn
-                        .inputs
-                        .iter()
-                        .map(|pin| pin.translated(origin))
-                        .collect(),
-                    outputs: drawn
-                        .outputs
-                        .iter()
-                        .map(|pin| pin.translated(origin))
-                        .collect(),
-                    splice_pins: drawn.splice_pins,
-                },
-            );
-            layout.nodes.insert(
-                *id,
-                NodeLayout {
-                    rect: drawn.rect,
-                    header_rect: drawn.header_rect,
-                    inputs: drawn.inputs,
-                    outputs: drawn.outputs,
-                    splice_pins: drawn.splice_pins,
-                    culled: false,
-                },
-            );
-        }
-        self.measures.retain(|id, _| graph.contains(*id));
-
-        layout.wires = self.route_wires(graph, &layout, style);
+        let nodes = self.draw_nodes(&mut canvas_ui, graph, content, style, viewport);
+        let wires = self.route_wires(graph, &nodes, to_global.scaling, style);
         canvas_ui.painter().set(
             wires_slot,
             Shape::Vec(
-                layout
-                    .wires
+                wires
                     .iter()
                     .map(|wire| {
                         Shape::line(
@@ -348,6 +223,13 @@ impl Canvas {
             ),
         );
 
+        let layout = GraphLayout {
+            to_global,
+            viewport,
+            nodes,
+            draw_order: self.draw_order.clone(),
+            wires,
+        };
         overlay::draw_overlay(
             canvas_ui.painter(),
             overlay::OverlayInput {
@@ -368,11 +250,11 @@ impl Canvas {
 
         let stats = CanvasStats {
             nodes: layout.nodes.len(),
-            culled,
+            culled: layout.nodes.values().filter(|node| node.culled).count(),
             wires: layout.wires.len(),
         };
         self.layout = layout;
-        self.resolve_pending_room(graph, style);
+        self.resolve_waiting_room(graph, style);
         CanvasResponse { events, stats }
     }
 
@@ -381,13 +263,7 @@ impl Canvas {
     /// wheel zooms around the pointer; a modified wheel (shift or alt, which
     /// egui turns into horizontal or vertical scroll) pans; ctrl and pinch
     /// zoom through egui's own `zoom_delta`.
-    fn navigate(
-        &mut self,
-        ui: &Ui,
-        background: &egui::Response,
-        panel_rect: Rect,
-        style: &CanvasStyle,
-    ) {
+    fn navigate(&mut self, ui: &Ui, background: &Response, panel_rect: Rect, style: &CanvasStyle) {
         if background.dragged_by(PointerButton::Middle)
             || background.dragged_by(PointerButton::Secondary)
         {
@@ -411,6 +287,8 @@ impl Canvas {
             )
         });
         if modifiers.is_none() {
+            // The curve egui's `InputState` applies to a modified wheel, so an
+            // unmodified one zooms at the same rate.
             let speed = ui
                 .ctx()
                 .options(|options| options.input_options.scroll_zoom_speed);
@@ -427,6 +305,10 @@ impl Canvas {
     }
 
     fn sync_draw_order<N>(&mut self, graph: &Graph<N>) {
+        if self.synced_topology == Some(graph.topology_revision()) {
+            return;
+        }
+        self.synced_topology = Some(graph.topology_revision());
         self.draw_order.retain(|id| graph.contains(*id));
         let present: BTreeSet<NodeId> = self.draw_order.iter().copied().collect();
         for (id, _) in graph.nodes() {
@@ -436,85 +318,204 @@ impl Canvas {
         }
     }
 
-    fn route_wires<N>(
+    /// Registers this frame's hit areas from where everything was drawn last
+    /// frame - in phase with egui, which hit-tests against last frame's rects
+    /// too. Node frames are registered before any content, so a widget inside
+    /// a node wins the tie and a slider stays a slider; pins come after the
+    /// frames, so they win the node's edge. Under the command modifier a
+    /// frame only senses clicks: click toggles the selection, while a drag
+    /// falls through to the background. See `post-mortems/4-Input Arbitration.md`.
+    fn register_interactors<N>(
         &self,
+        canvas_ui: &mut Ui,
         graph: &Graph<N>,
-        layout: &GraphLayout,
+        modifiers: egui::Modifiers,
+        style: &CanvasStyle,
+    ) -> (Interactors<NodeId>, Interactors<AnyPin>) {
+        let frame_sense = if modifiers.command {
+            Sense::click()
+        } else {
+            Sense::click_and_drag()
+        };
+        // Off-screen nodes cannot be pointed at.
+        let visible = self
+            .draw_order
+            .iter()
+            .filter(|id| graph.contains(**id))
+            .filter_map(|id| Some((*id, self.layout.nodes.get(id)?)))
+            .filter(|(_, node)| !node.culled);
+        let mut frames = Vec::new();
+        let mut pins = Vec::new();
+        for (id, node) in visible {
+            frames.push((
+                id,
+                canvas_ui.interact(node.rect, canvas_ui.id().with(("frame", id)), frame_sense),
+            ));
+            for (pin, rect) in node.pins(id) {
+                pins.push((
+                    pin,
+                    canvas_ui.interact(
+                        rect.expand(style.pin_hit_expansion),
+                        canvas_ui.id().with(("pin", pin)),
+                        Sense::click_and_drag(),
+                    ),
+                ));
+            }
+        }
+        (frames, pins)
+    }
+
+    /// Builds every node's content - or, for a node off-screen, places its
+    /// last geometry at its position without building anything.
+    fn draw_nodes<C: NodeContent>(
+        &mut self,
+        canvas_ui: &mut Ui,
+        graph: &mut Graph<C::Node>,
+        content: &mut C,
+        style: &CanvasStyle,
+        viewport: Rect,
+    ) -> BTreeMap<NodeId, NodeLayout> {
+        let cull_bounds = viewport.expand(CULL_MARGIN);
+        let mut nodes = BTreeMap::new();
+        for id in &self.draw_order {
+            let Some(node) = graph.node_mut(*id) else {
+                continue;
+            };
+            let pos = self.drawn_pos(*id, node.pos);
+            let previous = self.layout.nodes.get(id);
+            if let Some(previous) = previous
+                && !Rect::from_min_size(pos, previous.rect.size()).intersects(cull_bounds)
+            {
+                nodes.insert(*id, previous.translated(pos - previous.rect.min, true));
+                continue;
+            }
+            let drawn = node_ui::draw_node(
+                canvas_ui,
+                style,
+                content,
+                *id,
+                &mut node.payload,
+                pos,
+                previous.map(|previous| previous.rect.size()),
+            );
+            if previous.is_none() {
+                // Laid out against a placeholder size: do the frame again with
+                // the real one before anyone sees it.
+                canvas_ui
+                    .ctx()
+                    .request_discard("egui-noodle: first layout of a node");
+            }
+            nodes.insert(*id, drawn);
+        }
+        nodes
+    }
+
+    /// Routes every wire between this frame's pins, reusing last frame's
+    /// polyline when neither end nor either node moved and the zoom is the
+    /// same - which is nearly every wire, nearly every frame.
+    fn route_wires<N>(
+        &mut self,
+        graph: &Graph<N>,
+        nodes: &BTreeMap<NodeId, NodeLayout>,
+        zoom: f32,
         style: &CanvasStyle,
     ) -> Vec<WireLayout> {
-        let tolerance = style.wire_tolerance / self.view.zoom;
+        let same_zoom = self.layout.to_global.scaling == zoom;
+        let mut previous: BTreeMap<crate::Wire, WireLayout> =
+            std::mem::take(&mut self.layout.wires)
+                .into_iter()
+                .map(|wire| (wire.wire, wire))
+                .collect();
+        let tolerance = style.wire_tolerance / zoom;
         graph
             .wires()
             .iter()
             .filter_map(|wire| {
-                let from_node = layout.nodes.get(&wire.from.node)?;
-                let to_node = layout.nodes.get(&wire.to.node)?;
-                let from = from_node
+                let from_node = nodes.get(&wire.from.node)?;
+                let to_node = nodes.get(&wire.to.node)?;
+                let from_pin = from_node
                     .outputs
                     .iter()
                     .find(|pin| pin.id == wire.from.output)?;
-                let to = to_node.inputs.iter().find(|pin| pin.id == wire.to.input)?;
-                let route = route_wire(
-                    &WireEndpoints {
-                        from: from.rect.center(),
-                        to: to.rect.center(),
-                        from_node: from_node.rect,
-                        to_node: to_node.rect,
-                    },
-                    &style.wire_routing,
-                    0.0,
-                );
+                let to_pin = to_node.inputs.iter().find(|pin| pin.id == wire.to.input)?;
+                let (from, to) = (from_pin.rect.center(), to_pin.rect.center());
+
+                let node_unmoved = |id: NodeId| {
+                    self.layout.nodes.get(&id).map(|node| node.rect)
+                        == nodes.get(&id).map(|node| node.rect)
+                };
+                let reusable = previous.remove(wire).filter(|last| {
+                    same_zoom
+                        && last.from == from
+                        && last.to == to
+                        && node_unmoved(wire.from.node)
+                        && node_unmoved(wire.to.node)
+                });
+                let polyline = match reusable {
+                    Some(last) => last.polyline,
+                    None => round_corners(
+                        &route_wire(
+                            &WireEndpoints {
+                                from,
+                                to,
+                                from_node: from_node.rect,
+                                to_node: to_node.rect,
+                            },
+                            &style.wire_routing,
+                            0.0,
+                        ),
+                        style.wire_routing.corner_radius,
+                        tolerance,
+                    ),
+                };
                 Some(WireLayout {
                     wire: *wire,
-                    polyline: round_corners(&route, style.wire_routing.corner_radius, tolerance),
-                    color: from.color.lerp_to_gamma(to.color, 0.5),
+                    from,
+                    to,
+                    polyline,
+                    color: from_pin.color.lerp_to_gamma(to_pin.color, 0.5),
                 })
             })
             .collect()
     }
 
-    /// Turns a pending `make_room` into a slide once the inserted node has a
+    /// Turns a waiting `make_room` into a slide once the inserted node has a
     /// rect to measure the overhang from. Runs after this frame's layout, so a
     /// node created this frame is ready next frame.
-    fn resolve_pending_room<N>(&mut self, graph: &Graph<N>, style: &CanvasStyle) {
-        let Some(pending) = &self.pending_room else {
+    fn resolve_waiting_room<N>(&mut self, graph: &Graph<N>, style: &CanvasStyle) {
+        let Some(Room::Waiting {
+            inserted,
+            downstream,
+        }) = self.room
+        else {
             return;
         };
-        if !graph.contains(pending.inserted) || !graph.contains(pending.downstream) {
-            self.pending_room = None;
+        if !graph.contains(inserted) || !graph.contains(downstream) {
+            self.room = None;
             return;
         }
-        let (Some(inserted), Some(downstream)) = (
-            self.layout.nodes.get(&pending.inserted),
-            self.layout.nodes.get(&pending.downstream),
+        let (Some(inserted_layout), Some(downstream_layout)) = (
+            self.layout.nodes.get(&inserted),
+            self.layout.nodes.get(&downstream),
         ) else {
             return; // Not drawn yet; try again next frame.
         };
-        let overhang = inserted.rect.right() + style.auto_offset_margin - downstream.rect.left();
-        let mut cone: BTreeSet<NodeId> = graph
-            .downstream_nodes(pending.downstream)
-            .into_iter()
-            .collect();
-        cone.insert(pending.downstream);
-        cone.remove(&pending.inserted);
-        if overhang > 0.0 && !cone.is_empty() {
-            let start: BTreeMap<NodeId, Pos2> = cone
+        let overhang =
+            inserted_layout.rect.right() + style.auto_offset_margin - downstream_layout.rect.left();
+        let mut cone: BTreeSet<NodeId> = graph.downstream_nodes(downstream).into_iter().collect();
+        cone.insert(downstream);
+        cone.remove(&inserted);
+        self.room = (overhang > 0.0 && !cone.is_empty()).then(|| Room::Sliding {
+            start: cone
                 .iter()
                 .filter_map(|id| Some((*id, graph.node(*id)?.pos)))
-                .collect();
-            self.sliding = Some(Sliding {
-                target: start
-                    .keys()
-                    .map(|id| (*id, Vec2::new(overhang, 0.0)))
-                    .collect(),
-                current: start.keys().map(|id| (*id, Vec2::ZERO)).collect(),
-                start,
-            });
-        }
-        self.pending_room = None;
+                .collect(),
+            target: Vec2::new(overhang, 0.0),
+            current: Vec2::ZERO,
+        });
     }
 
-    /// Eases the sliding nodes toward their targets; when they arrive, reports
+    /// Eases the sliding nodes toward their target; when they arrive, reports
     /// the moves and stops.
     fn advance_slide<N>(
         &mut self,
@@ -522,69 +523,40 @@ impl Canvas {
         graph: &Graph<N>,
         events: &mut Vec<CanvasEvent>,
     ) {
-        let Some(sliding) = &mut self.sliding else {
+        let Some(Room::Sliding {
+            start,
+            target,
+            current,
+        }) = &mut self.room
+        else {
             return;
         };
-        let delta_time = ctx.input(|input| input.stable_dt).min(0.1);
-        let blend = 1.0 - (-delta_time / SLIDE_TIME_CONSTANT).exp();
-        let mut settled = true;
-        for (id, current) in sliding.current.iter_mut() {
-            let target = sliding.target.get(id).copied().unwrap_or(Vec2::ZERO);
-            *current += (target - *current) * blend;
-            if (target - *current).length() > 0.5 {
-                settled = false;
-            }
-        }
-        if !settled {
+        let delta_time = ctx.input(|input| input.stable_dt);
+        *current += (*target - *current)
+            * egui::emath::exponential_smooth_factor(SLIDE_REACH.0, SLIDE_REACH.1, delta_time);
+        if (*target - *current).length() > 0.5 {
             ctx.request_repaint();
             return;
         }
-        let moves: Vec<NodeMove> = sliding
-            .start
+        let moves: Vec<NodeMove> = start
             .iter()
             .filter(|(id, _)| graph.contains(**id))
-            .filter_map(|(id, from)| {
-                let to = *from + *sliding.target.get(id)?;
-                Some(NodeMove {
-                    id: *id,
-                    from: *from,
-                    to,
-                })
+            .map(|(id, from)| NodeMove {
+                id: *id,
+                from: *from,
+                to: *from + *target,
             })
             .collect();
         if !moves.is_empty() {
             events.push(CanvasEvent::NodesMoved { moves });
         }
-        self.sliding = None;
+        self.room = None;
     }
 
     pub(super) fn sliding_offset(&self, id: NodeId) -> Vec2 {
-        self.sliding
-            .as_ref()
-            .and_then(|sliding| sliding.current.get(&id).copied())
-            .unwrap_or(Vec2::ZERO)
-    }
-}
-
-impl NodeMeasure {
-    fn placed_at(&self, pos: Pos2) -> NodeLayout {
-        let offset = pos.to_vec2();
-        NodeLayout {
-            rect: Rect::from_min_size(pos, self.size),
-            // Not tracked for an unbuilt node; nothing hit-tests a culled header.
-            header_rect: Rect::from_min_size(pos, Vec2::new(self.size.x, 0.0)),
-            inputs: self
-                .inputs
-                .iter()
-                .map(|pin| pin.translated(offset))
-                .collect(),
-            outputs: self
-                .outputs
-                .iter()
-                .map(|pin| pin.translated(offset))
-                .collect(),
-            splice_pins: self.splice_pins,
-            culled: true,
+        match &self.room {
+            Some(Room::Sliding { start, current, .. }) if start.contains_key(&id) => *current,
+            _ => Vec2::ZERO,
         }
     }
 }

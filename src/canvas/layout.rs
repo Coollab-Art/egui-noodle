@@ -10,8 +10,6 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug)]
 pub struct GraphLayout {
     pub to_global: TSTransform,
-    /// Screen space: the area the canvas was drawn into.
-    pub panel_rect: Rect,
     /// Graph space: what the panel showed.
     pub viewport: Rect,
     pub nodes: BTreeMap<NodeId, NodeLayout>,
@@ -23,13 +21,12 @@ pub struct GraphLayout {
 #[derive(Clone, Debug)]
 pub struct NodeLayout {
     pub rect: Rect,
-    pub header_rect: Rect,
     pub inputs: Vec<InputPinLayout>,
     pub outputs: Vec<OutputPinLayout>,
     /// What `NodeContent::splice_pins` said: the pins this node would use if
     /// dropped on a wire, or `None` if it cannot be.
     pub splice_pins: Option<(InputId, OutputId)>,
-    /// Off-screen: laid out from its last measured size, content not built.
+    /// Off-screen: placed from its last measured geometry, content not built.
     pub culled: bool,
 }
 
@@ -53,10 +50,76 @@ pub struct OutputPinLayout {
 #[derive(Clone, Debug)]
 pub struct WireLayout {
     pub wire: Wire,
+    /// The output pin's centre, where the wire starts.
+    pub from: Pos2,
+    /// The input pin's centre, where it ends.
+    pub to: Pos2,
     /// Corners already rounded. The one polyline that was drawn, hit-tested
     /// and cut.
     pub polyline: Vec<Pos2>,
     pub color: Color32,
+}
+
+impl Default for GraphLayout {
+    fn default() -> Self {
+        Self {
+            to_global: TSTransform::IDENTITY,
+            viewport: Rect::NOTHING,
+            nodes: BTreeMap::new(),
+            draw_order: Vec::new(),
+            wires: Vec::new(),
+        }
+    }
+}
+
+impl NodeLayout {
+    /// Every pin with the rect it was drawn in.
+    pub fn pins(&self, node: NodeId) -> impl Iterator<Item = (AnyPin, Rect)> + '_ {
+        let inputs = self.inputs.iter().map(move |pin| {
+            (
+                AnyPin::In(InPin {
+                    node,
+                    input: pin.id,
+                }),
+                pin.rect,
+            )
+        });
+        let outputs = self.outputs.iter().map(move |pin| {
+            (
+                AnyPin::Out(OutPin {
+                    node,
+                    output: pin.id,
+                }),
+                pin.rect,
+            )
+        });
+        inputs.chain(outputs)
+    }
+
+    /// The same geometry moved by `offset`.
+    pub(super) fn translated(&self, offset: Vec2, culled: bool) -> NodeLayout {
+        NodeLayout {
+            rect: self.rect.translate(offset),
+            inputs: self
+                .inputs
+                .iter()
+                .map(|pin| InputPinLayout {
+                    rect: pin.rect.translate(offset),
+                    ..*pin
+                })
+                .collect(),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|pin| OutputPinLayout {
+                    rect: pin.rect.translate(offset),
+                    ..*pin
+                })
+                .collect(),
+            splice_pins: self.splice_pins,
+            culled,
+        }
+    }
 }
 
 impl WireLayout {
@@ -66,20 +129,12 @@ impl WireLayout {
         self.polyline
             .windows(2)
             .max_by(|a, b| a[0].distance_sq(a[1]).total_cmp(&b[0].distance_sq(b[1])))
-            .map(|segment| segment[0] + (segment[1] - segment[0]) / 2.0)
+            .map(|segment| segment[0].lerp(segment[1], 0.5))
     }
-}
 
-impl Default for GraphLayout {
-    fn default() -> Self {
-        Self {
-            to_global: TSTransform::IDENTITY,
-            panel_rect: Rect::NOTHING,
-            viewport: Rect::NOTHING,
-            nodes: BTreeMap::new(),
-            draw_order: Vec::new(),
-            wires: Vec::new(),
-        }
+    pub fn insert_button_rect(&self, size: f32) -> Option<Rect> {
+        self.insert_point()
+            .map(|center| Rect::from_center_size(center, Vec2::splat(size)))
     }
 }
 
@@ -96,37 +151,16 @@ impl GraphLayout {
     /// The pin whose grab area (its rect grown by `slack`) contains the point.
     /// Nearest wins when grab areas overlap.
     pub fn pin_at(&self, point: Pos2, slack: f32) -> Option<AnyPin> {
-        let mut best: Option<(f32, AnyPin)> = None;
-        let mut consider = |pin: AnyPin, rect: Rect| {
-            if !rect.expand(slack).contains(point) {
-                return;
-            }
-            let distance = rect.center().distance(point);
-            if best.is_none_or(|(best_distance, _)| distance < best_distance) {
-                best = Some((distance, pin));
-            }
-        };
-        for (id, node) in &self.nodes {
-            for pin in &node.inputs {
-                consider(
-                    AnyPin::In(InPin {
-                        node: *id,
-                        input: pin.id,
-                    }),
-                    pin.rect,
-                );
-            }
-            for pin in &node.outputs {
-                consider(
-                    AnyPin::Out(OutPin {
-                        node: *id,
-                        output: pin.id,
-                    }),
-                    pin.rect,
-                );
-            }
-        }
-        best.map(|(_, pin)| pin)
+        self.nodes
+            .iter()
+            .flat_map(|(id, node)| node.pins(*id))
+            .filter(|(_, rect)| rect.expand(slack).contains(point))
+            .min_by(|(_, a), (_, b)| {
+                a.center()
+                    .distance(point)
+                    .total_cmp(&b.center().distance(point))
+            })
+            .map(|(pin, _)| pin)
     }
 
     /// The wire passing within `slack` of the point. Nearest wins.
@@ -139,6 +173,17 @@ impl GraphLayout {
             .map(|(_, wire)| wire)
     }
 
+    /// The wire whose `+` button (of the given size) contains the point.
+    pub fn wire_with_insert_button_at(&self, point: Pos2, button_size: f32) -> Option<Wire> {
+        self.wires
+            .iter()
+            .find(|wire| {
+                wire.insert_button_rect(button_size)
+                    .is_some_and(|rect| rect.contains(point))
+            })
+            .map(|wire| wire.wire)
+    }
+
     pub fn nodes_intersecting(&self, rect: Rect) -> impl Iterator<Item = NodeId> + '_ {
         self.nodes
             .iter()
@@ -146,11 +191,8 @@ impl GraphLayout {
             .map(|(id, _)| *id)
     }
 
-    pub fn nodes_contained_by(&self, rect: Rect) -> impl Iterator<Item = NodeId> + '_ {
-        self.nodes
-            .iter()
-            .filter(move |(_, node)| rect.contains_rect(node.rect))
-            .map(|(id, _)| *id)
+    pub fn wire(&self, wire: Wire) -> Option<&WireLayout> {
+        self.wires.iter().find(|drawn| drawn.wire == wire)
     }
 
     pub fn input(&self, pin: InPin) -> Option<&InputPinLayout> {
@@ -184,24 +226,6 @@ impl GraphLayout {
     }
 }
 
-impl InputPinLayout {
-    pub(super) fn translated(&self, offset: Vec2) -> Self {
-        Self {
-            rect: self.rect.translate(offset),
-            ..*self
-        }
-    }
-}
-
-impl OutputPinLayout {
-    pub(super) fn translated(&self, offset: Vec2) -> Self {
-        Self {
-            rect: self.rect.translate(offset),
-            ..*self
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,7 +234,6 @@ mod tests {
     fn node(rect: Rect) -> NodeLayout {
         NodeLayout {
             rect,
-            header_rect: Rect::NOTHING,
             inputs: vec![],
             outputs: vec![],
             splice_pins: None,

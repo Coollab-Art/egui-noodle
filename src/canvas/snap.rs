@@ -2,6 +2,7 @@
 
 use egui::{Rect, Vec2};
 
+#[derive(Default)]
 pub(super) struct Snap {
     /// How far to shift the dragged group.
     pub delta: Vec2,
@@ -18,38 +19,26 @@ pub(super) fn snap_to_nodes(
     others: impl Iterator<Item = Rect>,
     threshold: f32,
 ) -> Snap {
-    let mut best_x: Option<(f32, f32)> = None; // (|delta|, candidate line)
+    let moving_x = [moving.left(), moving.center().x, moving.right()];
+    let moving_y = [moving.top(), moving.center().y, moving.bottom()];
+    let mut best_x: Option<(f32, f32)> = None; // (distance, candidate line)
     let mut best_y: Option<(f32, f32)> = None;
     for other in others {
         consider_axis(
-            [moving.left(), moving.center().x, moving.right()],
+            moving_x,
             [other.left(), other.center().x, other.right()],
             threshold,
             &mut best_x,
         );
         consider_axis(
-            [moving.top(), moving.center().y, moving.bottom()],
+            moving_y,
             [other.top(), other.center().y, other.bottom()],
             threshold,
             &mut best_y,
         );
     }
-    let delta_for = |best: Option<(f32, f32)>, moving_lines: [f32; 3]| {
-        best.map(|(_, line)| {
-            // Which of our lines snapped: the one nearest the candidate.
-            let nearest = moving_lines
-                .iter()
-                .copied()
-                .min_by(|a, b| (a - line).abs().total_cmp(&(b - line).abs()))
-                .unwrap_or(line);
-            line - nearest
-        })
-    };
     Snap {
-        delta: Vec2::new(
-            delta_for(best_x, [moving.left(), moving.center().x, moving.right()]).unwrap_or(0.0),
-            delta_for(best_y, [moving.top(), moving.center().y, moving.bottom()]).unwrap_or(0.0),
-        ),
+        delta: Vec2::new(shift_onto(best_x, moving_x), shift_onto(best_y, moving_y)),
         guide_x: best_x.map(|(_, line)| line),
         guide_y: best_y.map(|(_, line)| line),
     }
@@ -71,6 +60,19 @@ fn consider_axis(
             }
         }
     }
+}
+
+/// How far to move so that whichever of `moving_lines` is nearest the snapped
+/// line lands on it. Zero when nothing snapped.
+fn shift_onto(best: Option<(f32, f32)>, moving_lines: [f32; 3]) -> f32 {
+    let Some((_, line)) = best else {
+        return 0.0;
+    };
+    moving_lines
+        .iter()
+        .map(|moving| line - moving)
+        .min_by(|a, b| a.abs().total_cmp(&b.abs()))
+        .unwrap_or(0.0)
 }
 
 #[cfg(test)]

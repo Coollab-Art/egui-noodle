@@ -3,7 +3,8 @@ use egui::Pos2;
 
 /// What the user did on the canvas this frame. The canvas never changes the
 /// graph itself: the application applies these - directly with
-/// [`Graph::apply`], or by turning each into a command it can undo.
+/// [`Graph::apply`], or by turning each into a command it can undo. See
+/// `post-mortems/1-Application Owns the Model.md`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanvasEvent {
     /// A drag ended, or nodes finished sliding apart to make room. One event

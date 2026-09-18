@@ -1,0 +1,19 @@
+# Input Arbitration
+
+*2026 September 18*
+
+*Status: implemented.*
+
+A node canvas has several things that all want the primary button: node drag, pin drag, box-select, wire-cut, widgets inside nodes. Snarl resolves them inline while drawing, which is why its `ui.rs` is 2,700 lines and why none of it can be intercepted. Here every interactor is registered **before any content is drawn**, at where it was drawn *last* frame, and the gesture state machine reads those responses.
+
+## Alternatives considered
+
+**egui interactors for the canvas's own hit areas, vs. raw pointer input against the layout.** The raw-input design - read `pointer.primary_pressed()`, hit-test the last layout ourselves, decide - looks like it gives total control. It loses to egui's own machinery on the thing that matters most: a slider inside a node must win over the node's frame, and egui already decides that with its drag threshold, its click-vs-drag distinction and its "later registration wins the tie" rule. So node frames are `ui.interact`ed before content (content registered later wins), pins after frames (they win the node's edge), the wire's `+` last. Interaction is computed by egui at frame start from the previous frame's rects, so registering at last frame's layout is in phase with it, not a compromise.
+
+**A modifier changes what a frame *senses*, vs. a pre-input hook.** Wire-cut must take a primary drag away from both box-select and node-drag, including when the press starts over a node. Rather than an interception layer, under the command modifier node frames are registered with `Sense::click()` instead of `click_and_drag()`: a click still toggles the selection, and a drag has no drag-sensing widget under it, so egui hands it to the background, where the modifier makes it a cut. Suppression is a variable passed to `interact`, not a hack; the cost is one frame of lag when the modifier goes down, since senses register for the next frame.
+
+**Gestures read the previous frame's layout.** The alternative is to interleave: draw a node, discover it moved, patch wires and hit areas within the frame - snarl's shape. Reading last frame's `GraphLayout` for every hit-test (which wire is under the dragged node, which pin a wire is released over, what a cutting stroke crossed) removes that dance entirely and matches how egui itself hit-tests. The visible consequence, stated in the README's costs: a gesture starting on the very first frame a node appears sees nothing there yet.
+
+**The dragged node's own position tests for insert-on-drop, vs. the pointer's.** Blender tests the node rect against the link. We test `wire_at(pointer)`, excluding wires that touch the dragged node: it is predictable (the wire under the cursor), needs no rect-vs-polyline intersection, and holding Alt opts out for the case of moving a node past a wire.
+
+**Dragging from a connected input picks the wire up.** Blender's behaviour and the one that makes rewiring one gesture instead of two: a drag from an input that has wires detaches them as a bundle (all of them, for a `Multiple` input); released on another compatible input they move, on empty canvas they are removed, anywhere else they stay. A drag from an output always starts a new wire.
