@@ -34,6 +34,9 @@ pub struct CanvasStyle {
     pub wire_tolerance: f32,
     /// Graph units either side of a wire within which it counts as hovered.
     pub wire_hit_slack: f32,
+    /// The cutting stroke, in screen pixels; its colour also marks the wires
+    /// about to be cut.
+    pub wire_cut_stroke: Stroke,
 
     pub zoom_range: Rangef,
 
@@ -80,6 +83,7 @@ impl Default for CanvasStyle {
             wire_routing: WireRouting::default(),
             wire_tolerance: 0.3,
             wire_hit_slack: 6.0,
+            wire_cut_stroke: Stroke::new(2.0, Color32::from_rgb(230, 70, 60)),
 
             zoom_range: Rangef::new(0.1, 3.0),
 

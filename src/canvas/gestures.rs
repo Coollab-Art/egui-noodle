@@ -2,7 +2,9 @@
 //! The gesture in progress lives on the canvas; every effect on the graph
 //! leaves as a `CanvasEvent`.
 
-use super::{Canvas, CanvasEvent, CanvasStyle, NodeMove, snap};
+use super::{
+    Canvas, CanvasEvent, CanvasStyle, NodeMove, WireLayout, polyline_crosses_segment, snap,
+};
 use crate::{AnyPin, Graph, InPin, NodeId, OutPin, Wire};
 use egui::{Key, Modifiers, PointerButton, Pos2, Rect, Response, Vec2};
 use std::collections::BTreeMap;
@@ -38,6 +40,13 @@ pub(super) enum Gesture {
         /// output ends fixed, their loose ends following the pointer.
         detached: Vec<Wire>,
         current: Pos2,
+    },
+    CuttingWires {
+        /// The stroke so far, in graph space.
+        stroke: Vec<Pos2>,
+        /// Every wire the stroke has crossed. Shown as it grows, severed on
+        /// release.
+        crossed: Vec<Wire>,
     },
 }
 
@@ -192,6 +201,26 @@ impl Canvas {
                     finished = true;
                 }
             }
+            Gesture::CuttingWires { stroke, crossed } => {
+                if let Some(pointer) = pointer
+                    && stroke.last() != Some(&pointer)
+                {
+                    stroke.push(pointer);
+                    // Only the newest segment can cross anything new.
+                    let newest = &stroke[stroke.len() - 2..];
+                    for wire in wires_crossed_by(newest, &self.layout.wires) {
+                        if !crossed.contains(&wire) {
+                            crossed.push(wire);
+                        }
+                    }
+                }
+                if background.drag_stopped() {
+                    for wire in crossed.iter() {
+                        events.push(CanvasEvent::DisconnectRequested { wire: *wire });
+                    }
+                    finished = true;
+                }
+            }
         }
         self.gesture = if finished { Gesture::Idle } else { gesture };
 
@@ -209,9 +238,18 @@ impl Canvas {
         if background.drag_started_by(PointerButton::Primary)
             && let Some(pointer) = pointer
         {
-            self.gesture = Gesture::BoxSelecting {
-                start: pointer,
-                current: pointer,
+            // Under the command modifier node frames only sense clicks, so this
+            // drag reaches the background even when it began over a node.
+            self.gesture = if modifiers.command {
+                Gesture::CuttingWires {
+                    stroke: vec![pointer],
+                    crossed: Vec::new(),
+                }
+            } else {
+                Gesture::BoxSelecting {
+                    start: pointer,
+                    current: pointer,
+                }
             };
         }
         if background.clicked() && !modifiers.command {
@@ -358,9 +396,10 @@ impl Canvas {
             Gesture::DraggingNodes { targets, .. } => {
                 targets.get(&id).copied().unwrap_or(graph_pos)
             }
-            Gesture::Idle | Gesture::BoxSelecting { .. } | Gesture::DraggingWire { .. } => {
-                graph_pos
-            }
+            Gesture::Idle
+            | Gesture::BoxSelecting { .. }
+            | Gesture::DraggingWire { .. }
+            | Gesture::CuttingWires { .. } => graph_pos,
         }
     }
 
@@ -382,4 +421,62 @@ impl Canvas {
 /// Type compatibility is the application's, through the events it accepts.
 fn can_connect(from: OutPin, to: InPin) -> bool {
     from.node != to.node
+}
+
+/// Every wire whose drawn polyline the stroke crosses.
+fn wires_crossed_by(stroke: &[Pos2], wires: &[WireLayout]) -> Vec<Wire> {
+    wires
+        .iter()
+        .filter(|wire| {
+            stroke
+                .windows(2)
+                .any(|segment| polyline_crosses_segment(&wire.polyline, segment[0], segment[1]))
+        })
+        .map(|wire| wire.wire)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{InputId, OutputId};
+    use egui::{Color32, pos2};
+
+    fn wire_layout(index: u64, polyline: Vec<Pos2>) -> WireLayout {
+        WireLayout {
+            wire: Wire {
+                from: OutPin {
+                    node: NodeId(index),
+                    output: OutputId(0),
+                },
+                to: InPin {
+                    node: NodeId(index + 100),
+                    input: InputId(0),
+                },
+            },
+            polyline,
+            color: Color32::WHITE,
+        }
+    }
+
+    #[test]
+    fn a_stroke_cuts_every_wire_it_crosses_and_no_other() {
+        let wires = [
+            wire_layout(0, vec![pos2(0.0, 0.0), pos2(100.0, 0.0)]),
+            wire_layout(1, vec![pos2(0.0, 50.0), pos2(100.0, 50.0)]),
+            wire_layout(2, vec![pos2(0.0, 500.0), pos2(100.0, 500.0)]),
+        ];
+        // Down across the first two, bending away before the third.
+        let stroke = [pos2(50.0, -10.0), pos2(50.0, 60.0), pos2(300.0, 60.0)];
+
+        let crossed = wires_crossed_by(&stroke, &wires);
+
+        assert_eq!(crossed, vec![wires[0].wire, wires[1].wire]);
+    }
+
+    #[test]
+    fn a_single_point_is_no_stroke() {
+        let wires = [wire_layout(0, vec![pos2(0.0, 0.0), pos2(100.0, 0.0)])];
+        assert!(wires_crossed_by(&[pos2(50.0, 0.0)], &wires).is_empty());
+    }
 }

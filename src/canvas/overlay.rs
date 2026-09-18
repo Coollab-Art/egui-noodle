@@ -76,6 +76,22 @@ pub(super) fn draw_overlay(
                 );
             }
         }
+        Gesture::CuttingWires { stroke, crossed } => {
+            for wire in crossed {
+                if let Some(drawn) = layout.wires.iter().find(|drawn| drawn.wire == *wire) {
+                    painter.add(Shape::line(
+                        drawn.polyline.clone(),
+                        Stroke::new(style.wire_width * 1.5, style.wire_cut_stroke.color),
+                    ));
+                }
+            }
+            if stroke.len() >= 2 {
+                painter.add(Shape::line(
+                    stroke.clone(),
+                    screen_width(style.wire_cut_stroke, zoom),
+                ));
+            }
+        }
         Gesture::DraggingWire {
             origin,
             detached,

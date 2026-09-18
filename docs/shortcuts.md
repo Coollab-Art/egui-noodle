@@ -44,3 +44,9 @@ Dragged nodes snap to the edges and centres of the nodes around them, and to the
 | Right-click a wire | Remove it |
 
 A wire never connects a node to itself. Whether two pins are compatible beyond that is the application's decision.
+
+## Cutting wires
+
+| Gesture | Effect |
+| --- | --- |
+| Ctrl + drag (Cmd on macOS), starting on empty canvas or on a node | Draw a stroke; every wire it crosses is marked as you go and removed when you release |
