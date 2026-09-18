@@ -5,5 +5,7 @@
 #![forbid(unsafe_code)]
 
 mod canvas;
+mod model;
 
 pub use canvas::*;
+pub use model::*;

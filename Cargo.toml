@@ -13,4 +13,3 @@ categories = ["gui"]
 # build when cloned on its own. See AGENTS.md.
 [dependencies]
 egui = "0.36"
-rustc-hash = "2"
