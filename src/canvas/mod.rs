@@ -9,6 +9,7 @@ mod grid;
 mod layout;
 mod node_ui;
 mod overlay;
+mod room;
 mod snap;
 mod style;
 mod view;
@@ -23,10 +24,9 @@ pub use view::*;
 pub use wires::*;
 
 use crate::{AnyPin, Graph, NodeId};
-use egui::{
-    LayerId, PointerButton, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, UiBuilder, Vec2,
-};
+use egui::{LayerId, PointerButton, Rect, Response, Sense, Shape, Stroke, Ui, UiBuilder, Vec2};
 use gestures::{Gesture, Interactors};
+use room::Room;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One node-graph view. Keep it across frames; hand it the graph each frame.
@@ -48,22 +48,6 @@ pub struct Canvas {
     room: Option<Room>,
 }
 
-/// The slide-apart after a node is spliced into a wire, from `make_room` until
-/// the nodes have settled.
-enum Room {
-    /// The inserted node has not been drawn yet, so its size is unknown.
-    Waiting {
-        inserted: NodeId,
-        downstream: NodeId,
-    },
-    Sliding {
-        /// Where each sliding node is in the graph.
-        start: BTreeMap<NodeId, Pos2>,
-        target: Vec2,
-        current: Vec2,
-    },
-}
-
 pub struct CanvasResponse {
     /// In the order they happened. Apply them to the graph, or turn them
     /// into commands.
@@ -83,10 +67,6 @@ pub struct CanvasStats {
 /// How far past the panel a node may sit before its content is skipped.
 /// Generous, so a node half a screen away still animates in smoothly.
 const CULL_MARGIN: f32 = 200.0;
-
-/// The slide-apart covers this fraction of the remaining distance in this
-/// many seconds.
-const SLIDE_REACH: (f32, f32) = (0.9, 0.2);
 
 impl Canvas {
     pub fn new() -> Self {
@@ -114,19 +94,6 @@ impl Canvas {
     /// What the pointer is over while nothing is being dragged.
     pub fn hovered(&self) -> Hovered {
         self.hovered
-    }
-
-    /// Slides the nodes downstream of `downstream` rightwards until `inserted`
-    /// no longer overhangs it, animated. Call it after splicing a node into a
-    /// wire, with the wire's target as `downstream`. Takes effect once the
-    /// inserted node has been drawn and measured - so it is fine to call the
-    /// frame the node is created. The moves are reported as one `NodesMoved`
-    /// when the slide settles.
-    pub fn make_room(&mut self, inserted: NodeId, downstream: NodeId) {
-        self.room = Some(Room::Waiting {
-            inserted,
-            downstream,
-        });
     }
 
     pub fn show<C: NodeContent>(
@@ -477,86 +444,5 @@ impl Canvas {
                 })
             })
             .collect()
-    }
-
-    /// Turns a waiting `make_room` into a slide once the inserted node has a
-    /// rect to measure the overhang from. Runs after this frame's layout, so a
-    /// node created this frame is ready next frame.
-    fn resolve_waiting_room<N>(&mut self, graph: &Graph<N>, style: &CanvasStyle) {
-        let Some(Room::Waiting {
-            inserted,
-            downstream,
-        }) = self.room
-        else {
-            return;
-        };
-        if !graph.contains(inserted) || !graph.contains(downstream) {
-            self.room = None;
-            return;
-        }
-        let (Some(inserted_layout), Some(downstream_layout)) = (
-            self.layout.nodes.get(&inserted),
-            self.layout.nodes.get(&downstream),
-        ) else {
-            return; // Not drawn yet; try again next frame.
-        };
-        let overhang =
-            inserted_layout.rect.right() + style.auto_offset_margin - downstream_layout.rect.left();
-        let mut cone: BTreeSet<NodeId> = graph.downstream_nodes(downstream).into_iter().collect();
-        cone.insert(downstream);
-        cone.remove(&inserted);
-        self.room = (overhang > 0.0 && !cone.is_empty()).then(|| Room::Sliding {
-            start: cone
-                .iter()
-                .filter_map(|id| Some((*id, graph.node(*id)?.pos)))
-                .collect(),
-            target: Vec2::new(overhang, 0.0),
-            current: Vec2::ZERO,
-        });
-    }
-
-    /// Eases the sliding nodes toward their target; when they arrive, reports
-    /// the moves and stops.
-    fn advance_slide<N>(
-        &mut self,
-        ctx: &egui::Context,
-        graph: &Graph<N>,
-        events: &mut Vec<CanvasEvent>,
-    ) {
-        let Some(Room::Sliding {
-            start,
-            target,
-            current,
-        }) = &mut self.room
-        else {
-            return;
-        };
-        let delta_time = ctx.input(|input| input.stable_dt);
-        *current += (*target - *current)
-            * egui::emath::exponential_smooth_factor(SLIDE_REACH.0, SLIDE_REACH.1, delta_time);
-        if (*target - *current).length() > 0.5 {
-            ctx.request_repaint();
-            return;
-        }
-        let moves: Vec<NodeMove> = start
-            .iter()
-            .filter(|(id, _)| graph.contains(**id))
-            .map(|(id, from)| NodeMove {
-                id: *id,
-                from: *from,
-                to: *from + *target,
-            })
-            .collect();
-        if !moves.is_empty() {
-            events.push(CanvasEvent::NodesMoved { moves });
-        }
-        self.room = None;
-    }
-
-    pub(super) fn sliding_offset(&self, id: NodeId) -> Vec2 {
-        match &self.room {
-            Some(Room::Sliding { start, current, .. }) if start.contains_key(&id) => *current,
-            _ => Vec2::ZERO,
-        }
     }
 }
