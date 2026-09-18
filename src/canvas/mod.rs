@@ -16,12 +16,13 @@ mod wires;
 
 pub use content::*;
 pub use events::*;
+pub use gestures::Hovered;
 pub use layout::*;
 pub use style::*;
 pub use view::*;
 pub use wires::*;
 
-use crate::{Graph, InputId, NodeId, OutputId};
+use crate::{AnyPin, Graph, InPin, NodeId, OutPin};
 use egui::{LayerId, PointerButton, Rect, Sense, Shape, Stroke, Ui, UiBuilder, Vec2};
 use gestures::Gesture;
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,13 +42,14 @@ pub struct Canvas {
     measures: BTreeMap<NodeId, NodeMeasure>,
     selection: BTreeSet<NodeId>,
     gesture: Gesture,
+    hovered: Hovered,
 }
 
 struct NodeMeasure {
     size: Vec2,
     /// Relative to the node's top-left.
-    inputs: Vec<PinLayout<InputId>>,
-    outputs: Vec<PinLayout<OutputId>>,
+    inputs: Vec<InputPinLayout>,
+    outputs: Vec<OutputPinLayout>,
 }
 
 pub struct CanvasResponse {
@@ -93,6 +95,11 @@ impl Canvas {
         self.selection = nodes.into_iter().collect();
     }
 
+    /// What the pointer is over while nothing is being dragged.
+    pub fn hovered(&self) -> Hovered {
+        self.hovered
+    }
+
     pub fn show<C: NodeContent>(
         &mut self,
         ui: &mut Ui,
@@ -126,9 +133,10 @@ impl Canvas {
         // Interaction first, from where everything was drawn last frame - in
         // phase with egui, which hit-tests against last frame's rects too.
         // Node frames are registered before any content, so a widget inside a
-        // node wins the tie and a slider stays a slider. Under the command
-        // modifier a frame only senses clicks: click toggles the selection,
-        // while a drag falls through to the background.
+        // node wins the tie and a slider stays a slider; pins come after the
+        // frames, so they win the node's edge. Under the command modifier a
+        // frame only senses clicks: click toggles the selection, while a drag
+        // falls through to the background.
         let modifiers = canvas_ui.input(|input| input.modifiers);
         let frame_sense = if modifiers.command {
             Sense::click()
@@ -146,6 +154,38 @@ impl Canvas {
                 Some((*id, response))
             })
             .collect();
+        let mut pins: Vec<(AnyPin, egui::Response)> = Vec::new();
+        for (id, node) in &self.layout.nodes {
+            if !graph.contains(*id) {
+                continue;
+            }
+            let inputs = node.inputs.iter().map(|pin| {
+                (
+                    AnyPin::In(InPin {
+                        node: *id,
+                        input: pin.id,
+                    }),
+                    pin.rect,
+                )
+            });
+            let outputs = node.outputs.iter().map(|pin| {
+                (
+                    AnyPin::Out(OutPin {
+                        node: *id,
+                        output: pin.id,
+                    }),
+                    pin.rect,
+                )
+            });
+            for (pin, rect) in inputs.chain(outputs) {
+                let response = canvas_ui.interact(
+                    rect.expand(style.pin_hit_expansion),
+                    canvas_ui.id().with(("pin", pin)),
+                    Sense::click_and_drag(),
+                );
+                pins.push((pin, response));
+            }
+        }
         let pointer = canvas_ui
             .input(|input| input.pointer.latest_pos())
             .map(|pointer| to_global.inverse() * pointer);
@@ -153,6 +193,7 @@ impl Canvas {
         self.handle_input(
             graph,
             &frames,
+            &pins,
             &background,
             pointer,
             modifiers,
@@ -211,12 +252,21 @@ impl Canvas {
                     .ctx()
                     .request_discard("egui-noodle: first layout of a node");
             }
+            let origin = -drawn.rect.min.to_vec2();
             self.measures.insert(
                 *id,
                 NodeMeasure {
                     size: drawn.rect.size(),
-                    inputs: translated(&drawn.inputs, -drawn.rect.min.to_vec2()),
-                    outputs: translated(&drawn.outputs, -drawn.rect.min.to_vec2()),
+                    inputs: drawn
+                        .inputs
+                        .iter()
+                        .map(|pin| pin.translated(origin))
+                        .collect(),
+                    outputs: drawn
+                        .outputs
+                        .iter()
+                        .map(|pin| pin.translated(origin))
+                        .collect(),
                 },
             );
             layout.nodes.insert(
@@ -254,6 +304,7 @@ impl Canvas {
             &layout,
             &self.selection,
             &self.gesture,
+            self.hovered,
             style,
             self.view.zoom,
         );
@@ -370,22 +421,22 @@ impl Canvas {
 
 impl NodeMeasure {
     fn placed_at(&self, pos: egui::Pos2) -> NodeLayout {
+        let offset = pos.to_vec2();
         NodeLayout {
             rect: Rect::from_min_size(pos, self.size),
             // Not tracked for an unbuilt node; nothing hit-tests a culled header.
             header_rect: Rect::from_min_size(pos, Vec2::new(self.size.x, 0.0)),
-            inputs: translated(&self.inputs, pos.to_vec2()),
-            outputs: translated(&self.outputs, pos.to_vec2()),
+            inputs: self
+                .inputs
+                .iter()
+                .map(|pin| pin.translated(offset))
+                .collect(),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|pin| pin.translated(offset))
+                .collect(),
             culled: true,
         }
     }
-}
-
-fn translated<Id: Copy>(pins: &[PinLayout<Id>], offset: Vec2) -> Vec<PinLayout<Id>> {
-    pins.iter()
-        .map(|pin| PinLayout {
-            rect: pin.rect.translate(offset),
-            ..*pin
-        })
-        .collect()
 }

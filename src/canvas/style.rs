@@ -32,6 +32,8 @@ pub struct CanvasStyle {
     pub wire_routing: WireRouting,
     /// Screen pixels a wire's corner arcs may deviate from the true arc.
     pub wire_tolerance: f32,
+    /// Graph units either side of a wire within which it counts as hovered.
+    pub wire_hit_slack: f32,
 
     pub zoom_range: Rangef,
 
@@ -77,6 +79,7 @@ impl Default for CanvasStyle {
             wire_width: 2.0,
             wire_routing: WireRouting::default(),
             wire_tolerance: 0.3,
+            wire_hit_slack: 6.0,
 
             zoom_range: Rangef::new(0.1, 3.0),
 

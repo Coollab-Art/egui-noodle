@@ -5,7 +5,7 @@
 
 use egui::{Color32, pos2};
 use egui_noodle::{
-    Canvas, CanvasEvent, CanvasStyle, ConnectionPolicy, Graph, InPin, InputId, InputSpec,
+    AnyPin, Canvas, CanvasEvent, CanvasStyle, ConnectionPolicy, Graph, InPin, InputId, InputSpec,
     NodeContent, NodeId, OutPin, OutputId, OutputSpec,
 };
 
@@ -101,6 +101,19 @@ impl eframe::App for Demo {
                         .add_node(node("New", &["in", "amount"], &["out"]), *pos);
                     self.canvas.select_only(id);
                 }
+                // What an application's node menu would do: complete the wire
+                // with a new node.
+                CanvasEvent::WireDropped { from, pos } => {
+                    let id = self
+                        .graph
+                        .add_node(node("New", &["in", "amount"], &["out"]), *pos);
+                    let wire = match from {
+                        AnyPin::Out(from) => (*from, in_pin(id, 0)),
+                        AnyPin::In(to) => (out_pin(id, 0), *to),
+                    };
+                    let _ = self.graph.connect(wire.0, wire.1, ConnectionPolicy::Single);
+                    self.canvas.select_only(id);
+                }
                 other => self.graph.apply(other),
             }
         }
@@ -193,15 +206,23 @@ fn stress_graph() -> Graph<DemoNode> {
 fn connect(graph: &mut Graph<DemoNode>, from: NodeId, output: u64, to: NodeId, input: u64) {
     graph
         .connect(
-            OutPin {
-                node: from,
-                output: OutputId(output),
-            },
-            InPin {
-                node: to,
-                input: InputId(input),
-            },
+            out_pin(from, output),
+            in_pin(to, input),
             ConnectionPolicy::Single,
         )
         .expect("demo nodes exist");
+}
+
+fn out_pin(node: NodeId, output: u64) -> OutPin {
+    OutPin {
+        node,
+        output: OutputId(output),
+    }
+}
+
+fn in_pin(node: NodeId, input: u64) -> InPin {
+    InPin {
+        node,
+        input: InputId(input),
+    }
 }

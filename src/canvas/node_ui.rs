@@ -1,5 +1,5 @@
-use super::{CanvasStyle, NodeContent, PinLayout, PinShape};
-use crate::{InputId, NodeId, OutputId};
+use super::{CanvasStyle, InputPinLayout, NodeContent, OutputPinLayout, PinShape};
+use crate::NodeId;
 use egui::{
     Align, Color32, CornerRadius, Frame, Layout, Rect, Shape, Stroke, TextWrapMode, Ui, UiBuilder,
     Vec2, pos2,
@@ -9,8 +9,8 @@ use egui::{
 pub(super) struct DrawnNode {
     pub rect: Rect,
     pub header_rect: Rect,
-    pub inputs: Vec<PinLayout<InputId>>,
-    pub outputs: Vec<PinLayout<OutputId>>,
+    pub inputs: Vec<InputPinLayout>,
+    pub outputs: Vec<OutputPinLayout>,
 }
 
 /// Lays out and paints one node into `canvas_ui` (graph space), with its
@@ -104,10 +104,11 @@ pub(super) fn draw_node<C: NodeContent>(
         .map(|(input, row)| {
             let pin_rect = Rect::from_center_size(pos2(rect.left(), row.center().y), pin_size);
             draw_pin(painter, style, pin_rect, input.color);
-            PinLayout {
+            InputPinLayout {
                 id: input.id,
                 rect: pin_rect,
                 color: input.color,
+                policy: input.policy,
             }
         })
         .collect();
@@ -117,7 +118,7 @@ pub(super) fn draw_node<C: NodeContent>(
         .map(|(output, row)| {
             let pin_rect = Rect::from_center_size(pos2(rect.right(), row.center().y), pin_size);
             draw_pin(painter, style, pin_rect, output.color);
-            PinLayout {
+            OutputPinLayout {
                 id: output.id,
                 rect: pin_rect,
                 color: output.color,

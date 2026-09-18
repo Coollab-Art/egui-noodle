@@ -1,9 +1,9 @@
-//! Selecting, dragging and deleting nodes, and box selection. The gesture in
-//! progress lives on the canvas; every effect on the graph leaves as a
-//! `CanvasEvent`.
+//! Selecting, dragging and deleting nodes, box selection, and dragging wires.
+//! The gesture in progress lives on the canvas; every effect on the graph
+//! leaves as a `CanvasEvent`.
 
 use super::{Canvas, CanvasEvent, CanvasStyle, NodeMove, snap};
-use crate::{Graph, NodeId};
+use crate::{AnyPin, Graph, InPin, NodeId, OutPin, Wire};
 use egui::{Key, Modifiers, PointerButton, Pos2, Rect, Response, Vec2};
 use std::collections::BTreeMap;
 
@@ -30,15 +30,32 @@ pub(super) enum Gesture {
         start: Pos2,
         current: Pos2,
     },
+    DraggingWire {
+        /// The pin the drag started on.
+        origin: AnyPin,
+        /// Dragging from an input that already had wires picks them up
+        /// instead of starting a new one: these move as a bundle, their
+        /// output ends fixed, their loose ends following the pointer.
+        detached: Vec<Wire>,
+        current: Pos2,
+    },
+}
+
+/// What is under the pointer while nothing is being dragged.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Hovered {
+    pub wire: Option<Wire>,
+    pub pin: Option<AnyPin>,
 }
 
 impl Canvas {
-    /// Reads this frame's node-frame responses and the background's, updates
-    /// the gesture and the selection, and reports what changed.
+    /// Reads this frame's responses - node frames, pins and the background -
+    /// updates the gesture and the selection, and reports what changed.
     pub(super) fn handle_input<N>(
         &mut self,
         graph: &Graph<N>,
         frames: &[(NodeId, Response)],
+        pins: &[(AnyPin, Response)],
         background: &Response,
         pointer: Option<Pos2>,
         modifiers: Modifiers,
@@ -64,6 +81,25 @@ impl Canvas {
                 if let Some(pointer) = pointer {
                     self.gesture = self.begin_node_drag(graph, *id, pointer);
                 }
+            }
+        }
+
+        for (pin, response) in pins {
+            if response.drag_started_by(PointerButton::Primary)
+                && let Some(pointer) = pointer
+            {
+                let detached = match pin {
+                    AnyPin::In(input) => graph
+                        .sources_of(*input)
+                        .map(|from| Wire { from, to: *input })
+                        .collect(),
+                    AnyPin::Out(_) => Vec::new(),
+                };
+                self.gesture = Gesture::DraggingWire {
+                    origin: *pin,
+                    detached,
+                    current: pointer,
+                };
             }
         }
 
@@ -137,8 +173,38 @@ impl Canvas {
                     finished = true;
                 }
             }
+            Gesture::DraggingWire {
+                origin,
+                detached,
+                current,
+            } => {
+                if let Some(pointer) = pointer {
+                    *current = pointer;
+                }
+                let origin_response = pins
+                    .iter()
+                    .find(|(pin, _)| pin == origin)
+                    .map(|(_, response)| response);
+                let ended = origin_response.is_none_or(|response| response.drag_stopped());
+                if ended {
+                    let target = self.layout.pin_at(*current, style.pin_hit_expansion);
+                    self.release_wire(*origin, detached, target, *current, events);
+                    finished = true;
+                }
+            }
         }
         self.gesture = if finished { Gesture::Idle } else { gesture };
+
+        self.hovered = Hovered::default();
+        if matches!(self.gesture, Gesture::Idle)
+            && let Some(pointer) = pointer
+            && background.contains_pointer()
+        {
+            self.hovered.pin = self.layout.pin_at(pointer, style.pin_hit_expansion);
+            if self.hovered.pin.is_none() && self.layout.node_at(pointer).is_none() {
+                self.hovered.wire = self.layout.wire_at(pointer, style.wire_hit_slack);
+            }
+        }
 
         if background.drag_started_by(PointerButton::Primary)
             && let Some(pointer) = pointer
@@ -154,7 +220,10 @@ impl Canvas {
         if background.secondary_clicked()
             && let Some(pos) = pointer
         {
-            events.push(CanvasEvent::ContextMenuRequested { pos });
+            match self.hovered.wire {
+                Some(wire) => events.push(CanvasEvent::DisconnectRequested { wire }),
+                None => events.push(CanvasEvent::ContextMenuRequested { pos }),
+            }
         }
 
         let delete_pressed = background
@@ -168,6 +237,63 @@ impl Canvas {
             events.push(CanvasEvent::DeleteRequested {
                 nodes: self.selection.iter().copied().collect(),
             });
+        }
+    }
+
+    /// What a wire drag becomes when it is released over `target`.
+    ///
+    /// Picked-up wires move to a compatible input, are dropped on empty
+    /// canvas, and are left alone when released anywhere else. A new wire
+    /// connects to a compatible pin, asks the application for a node when
+    /// released on empty canvas, and otherwise does nothing.
+    fn release_wire(
+        &self,
+        origin: AnyPin,
+        detached: &[Wire],
+        target: Option<AnyPin>,
+        pos: Pos2,
+        events: &mut Vec<CanvasEvent>,
+    ) {
+        if !detached.is_empty() {
+            match target {
+                Some(AnyPin::In(to)) if Some(AnyPin::In(to)) != Some(origin) => {
+                    let Some(policy) = self.layout.input(to).map(|input| input.policy) else {
+                        return;
+                    };
+                    for wire in detached {
+                        if can_connect(wire.from, to) {
+                            events.push(CanvasEvent::DisconnectRequested { wire: *wire });
+                            events.push(CanvasEvent::ConnectRequested {
+                                from: wire.from,
+                                to,
+                                policy,
+                            });
+                        }
+                    }
+                }
+                None => {
+                    for wire in detached {
+                        events.push(CanvasEvent::DisconnectRequested { wire: *wire });
+                    }
+                }
+                Some(_) => {}
+            }
+            return;
+        }
+
+        match (origin, target) {
+            (AnyPin::Out(from), Some(AnyPin::In(to))) if can_connect(from, to) => {
+                if let Some(policy) = self.layout.input(to).map(|input| input.policy) {
+                    events.push(CanvasEvent::ConnectRequested { from, to, policy });
+                }
+            }
+            (AnyPin::In(to), Some(AnyPin::Out(from))) if can_connect(from, to) => {
+                if let Some(policy) = self.layout.input(to).map(|input| input.policy) {
+                    events.push(CanvasEvent::ConnectRequested { from, to, policy });
+                }
+            }
+            (from, None) => events.push(CanvasEvent::WireDropped { from, pos }),
+            _ => {}
         }
     }
 
@@ -232,7 +358,9 @@ impl Canvas {
             Gesture::DraggingNodes { targets, .. } => {
                 targets.get(&id).copied().unwrap_or(graph_pos)
             }
-            Gesture::Idle | Gesture::BoxSelecting { .. } => graph_pos,
+            Gesture::Idle | Gesture::BoxSelecting { .. } | Gesture::DraggingWire { .. } => {
+                graph_pos
+            }
         }
     }
 
@@ -248,4 +376,10 @@ impl Canvas {
             self.selection.insert(id);
         }
     }
+}
+
+/// The one rule the canvas itself imposes: a node does not wire into itself.
+/// Type compatibility is the application's, through the events it accepts.
+fn can_connect(from: OutPin, to: InPin) -> bool {
+    from.node != to.node
 }

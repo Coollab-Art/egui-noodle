@@ -1,9 +1,12 @@
 //! What is painted over the nodes: selection outlines, the box-selection
-//! rectangle, and snap guides.
+//! rectangle, snap guides, hover highlights, and the wire being dragged.
 
-use super::{CanvasStyle, GraphLayout, gestures::Gesture};
-use crate::NodeId;
-use egui::{CornerRadius, Painter, Rect, Stroke, StrokeKind, pos2};
+use super::{
+    CanvasStyle, GraphLayout, WireEndpoints, gestures::Gesture, gestures::Hovered, node_ui,
+    round_corners, route_wire,
+};
+use crate::{AnyPin, NodeId};
+use egui::{Color32, CornerRadius, Painter, Rect, Shape, Stroke, StrokeKind, pos2};
 use std::collections::BTreeSet;
 
 pub(super) fn draw_overlay(
@@ -11,6 +14,7 @@ pub(super) fn draw_overlay(
     layout: &GraphLayout,
     selection: &BTreeSet<NodeId>,
     gesture: &Gesture,
+    hovered: Hovered,
     style: &CanvasStyle,
     zoom: f32,
 ) {
@@ -28,6 +32,18 @@ pub(super) fn draw_overlay(
                 StrokeKind::Middle,
             );
         }
+    }
+
+    if let Some(wire) = hovered.wire
+        && let Some(drawn) = layout.wires.iter().find(|drawn| drawn.wire == wire)
+    {
+        painter.add(Shape::line(
+            drawn.polyline.clone(),
+            Stroke::new(style.wire_width * 1.5, highlight(drawn.color)),
+        ));
+    }
+    if let Some(pin) = hovered.pin {
+        draw_pin_highlight(painter, layout, pin, style);
     }
 
     match gesture {
@@ -60,7 +76,83 @@ pub(super) fn draw_overlay(
                 );
             }
         }
+        Gesture::DraggingWire {
+            origin,
+            detached,
+            current,
+        } => {
+            let color = layout.pin_color(*origin).unwrap_or(Color32::GRAY);
+            let loose_end = Rect::from_center_size(*current, egui::Vec2::ZERO);
+            let tolerance = style.wire_tolerance / zoom;
+            let draw = |ends: WireEndpoints| {
+                let route = route_wire(&ends, &style.wire_routing, 0.0);
+                painter.add(Shape::line(
+                    round_corners(&route, style.wire_routing.corner_radius, tolerance),
+                    Stroke::new(style.wire_width, color),
+                ));
+            };
+            if detached.is_empty() {
+                match origin {
+                    AnyPin::Out(from) => {
+                        if let (Some(pin), Some(node)) =
+                            (layout.output(*from), layout.nodes.get(&from.node))
+                        {
+                            draw(WireEndpoints {
+                                from: pin.rect.center(),
+                                to: *current,
+                                from_node: node.rect,
+                                to_node: loose_end,
+                            });
+                        }
+                    }
+                    AnyPin::In(to) => {
+                        if let (Some(pin), Some(node)) =
+                            (layout.input(*to), layout.nodes.get(&to.node))
+                        {
+                            draw(WireEndpoints {
+                                from: *current,
+                                to: pin.rect.center(),
+                                from_node: loose_end,
+                                to_node: node.rect,
+                            });
+                        }
+                    }
+                }
+            } else {
+                for wire in detached {
+                    if let (Some(pin), Some(node)) =
+                        (layout.output(wire.from), layout.nodes.get(&wire.from.node))
+                    {
+                        draw(WireEndpoints {
+                            from: pin.rect.center(),
+                            to: *current,
+                            from_node: node.rect,
+                            to_node: loose_end,
+                        });
+                    }
+                }
+            }
+            // The pin this would land on, if any.
+            if let Some(target) = layout.pin_at(*current, style.pin_hit_expansion) {
+                draw_pin_highlight(painter, layout, target, style);
+            }
+        }
     }
+}
+
+fn draw_pin_highlight(painter: &Painter, layout: &GraphLayout, pin: AnyPin, style: &CanvasStyle) {
+    if let (Some(rect), Some(color)) = (layout.pin_rect(pin), layout.pin_color(pin)) {
+        node_ui::draw_pin(
+            painter,
+            style,
+            rect.expand(style.pin_size * 0.35),
+            highlight(color),
+        );
+    }
+}
+
+fn highlight(color: Color32) -> Color32 {
+    color.lerp_to_gamma(Color32::WHITE, 0.35)
 }
 
 /// A stroke `zoom`-adjusted to keep its width in screen pixels.

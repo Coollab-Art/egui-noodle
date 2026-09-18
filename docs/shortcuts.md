@@ -33,3 +33,14 @@ The primary button is left free for selecting and dragging nodes.
 | Right-click empty canvas | Ask the application for its menu at that point |
 
 Dragged nodes snap to the edges and centres of the nodes around them, and to the grid when the application turns that on. An orange guide shows what they snapped to.
+
+## Wiring
+
+| Gesture | Effect |
+| --- | --- |
+| Drag from a pin to another pin | Connect them |
+| Drag from a pin and release on empty canvas | Ask the application for a node to complete the wire |
+| Drag from an input that is already wired | Pick the wire up: drop it on another input to move it, on empty canvas to remove it, anywhere else to leave it as it was |
+| Right-click a wire | Remove it |
+
+A wire never connects a node to itself. Whether two pins are compatible beyond that is the application's decision.

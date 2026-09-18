@@ -1,6 +1,6 @@
 use super::distance_to_polyline;
-use crate::{AnyPin, InPin, InputId, NodeId, OutPin, OutputId, Wire};
-use egui::{Color32, Pos2, Rect, emath::TSTransform};
+use crate::{AnyPin, ConnectionPolicy, InPin, InputId, NodeId, OutPin, OutputId, Wire};
+use egui::{Color32, Pos2, Rect, Vec2, emath::TSTransform};
 use std::collections::BTreeMap;
 
 /// Where everything was drawn last frame, in graph space. This is what the
@@ -24,15 +24,24 @@ pub struct GraphLayout {
 pub struct NodeLayout {
     pub rect: Rect,
     pub header_rect: Rect,
-    pub inputs: Vec<PinLayout<InputId>>,
-    pub outputs: Vec<PinLayout<OutputId>>,
+    pub inputs: Vec<InputPinLayout>,
+    pub outputs: Vec<OutputPinLayout>,
     /// Off-screen: laid out from its last measured size, content not built.
     pub culled: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct PinLayout<Id> {
-    pub id: Id,
+pub struct InputPinLayout {
+    pub id: InputId,
+    /// The drawn pin, not the grab area.
+    pub rect: Rect,
+    pub color: Color32,
+    pub policy: ConnectionPolicy,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OutputPinLayout {
+    pub id: OutputId,
     /// The drawn pin, not the grab area.
     pub rect: Rect,
     pub color: Color32,
@@ -130,19 +139,51 @@ impl GraphLayout {
             .map(|(id, _)| *id)
     }
 
+    pub fn input(&self, pin: InPin) -> Option<&InputPinLayout> {
+        self.nodes
+            .get(&pin.node)?
+            .inputs
+            .iter()
+            .find(|layout| layout.id == pin.input)
+    }
+
+    pub fn output(&self, pin: OutPin) -> Option<&OutputPinLayout> {
+        self.nodes
+            .get(&pin.node)?
+            .outputs
+            .iter()
+            .find(|layout| layout.id == pin.output)
+    }
+
     pub fn pin_rect(&self, pin: AnyPin) -> Option<Rect> {
-        let node = self.nodes.get(&pin.node())?;
         match pin {
-            AnyPin::In(pin) => node
-                .inputs
-                .iter()
-                .find(|layout| layout.id == pin.input)
-                .map(|layout| layout.rect),
-            AnyPin::Out(pin) => node
-                .outputs
-                .iter()
-                .find(|layout| layout.id == pin.output)
-                .map(|layout| layout.rect),
+            AnyPin::In(pin) => self.input(pin).map(|layout| layout.rect),
+            AnyPin::Out(pin) => self.output(pin).map(|layout| layout.rect),
+        }
+    }
+
+    pub fn pin_color(&self, pin: AnyPin) -> Option<Color32> {
+        match pin {
+            AnyPin::In(pin) => self.input(pin).map(|layout| layout.color),
+            AnyPin::Out(pin) => self.output(pin).map(|layout| layout.color),
+        }
+    }
+}
+
+impl InputPinLayout {
+    pub(super) fn translated(&self, offset: Vec2) -> Self {
+        Self {
+            rect: self.rect.translate(offset),
+            ..*self
+        }
+    }
+}
+
+impl OutputPinLayout {
+    pub(super) fn translated(&self, offset: Vec2) -> Self {
+        Self {
+            rect: self.rect.translate(offset),
+            ..*self
         }
     }
 }
@@ -194,15 +235,17 @@ mod tests {
         let id = NodeId(1);
         let mut node = node(Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0)));
         node.inputs = vec![
-            PinLayout {
+            InputPinLayout {
                 id: InputId(0),
                 rect: Rect::from_center_size(pos2(0.0, 20.0), vec2(8.0, 8.0)),
                 color: Color32::WHITE,
+                policy: ConnectionPolicy::Single,
             },
-            PinLayout {
+            InputPinLayout {
                 id: InputId(1),
                 rect: Rect::from_center_size(pos2(0.0, 30.0), vec2(8.0, 8.0)),
                 color: Color32::WHITE,
+                policy: ConnectionPolicy::Single,
             },
         ];
         let layout = layout_with(vec![(id, node)]);
