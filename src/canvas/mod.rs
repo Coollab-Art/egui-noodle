@@ -1,16 +1,21 @@
 //! The canvas: draws a `Graph` and reports what the user did to it. It owns
-//! only view state - pan, zoom, and what it measured last frame - never the
-//! graph.
+//! only view state - pan, zoom, selection, the gesture in progress, and what
+//! it measured last frame - never the graph.
 
 mod content;
+mod events;
+mod gestures;
 mod grid;
 mod layout;
 mod node_ui;
+mod overlay;
+mod snap;
 mod style;
 mod view;
 mod wires;
 
 pub use content::*;
+pub use events::*;
 pub use layout::*;
 pub use style::*;
 pub use view::*;
@@ -18,6 +23,7 @@ pub use wires::*;
 
 use crate::{Graph, InputId, NodeId, OutputId};
 use egui::{LayerId, PointerButton, Rect, Sense, Shape, Stroke, Ui, UiBuilder, Vec2};
+use gestures::Gesture;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One node-graph view. Keep it across frames; hand it the graph each frame.
@@ -33,6 +39,8 @@ pub struct Canvas {
     /// Each node's size and pin placement the last time it was built, so an
     /// off-screen node can be laid out without building its content.
     measures: BTreeMap<NodeId, NodeMeasure>,
+    selection: BTreeSet<NodeId>,
+    gesture: Gesture,
 }
 
 struct NodeMeasure {
@@ -43,6 +51,9 @@ struct NodeMeasure {
 }
 
 pub struct CanvasResponse {
+    /// In the order they happened. Apply them to the graph, or turn them
+    /// into commands.
+    pub events: Vec<CanvasEvent>,
     pub stats: CanvasStats,
 }
 
@@ -67,6 +78,19 @@ impl Canvas {
     /// Where everything was drawn last frame.
     pub fn layout(&self) -> &GraphLayout {
         &self.layout
+    }
+
+    pub fn selection(&self) -> &BTreeSet<NodeId> {
+        &self.selection
+    }
+
+    pub fn select_only(&mut self, id: NodeId) {
+        self.selection.clear();
+        self.selection.insert(id);
+    }
+
+    pub fn set_selection(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
+        self.selection = nodes.into_iter().collect();
     }
 
     pub fn show<C: NodeContent>(
@@ -97,6 +121,45 @@ impl Canvas {
         canvas_ui.set_clip_rect(to_global.inverse() * panel_rect.intersect(ui.clip_rect()));
         canvas_ui.ctx().set_transform_layer(layer_id, to_global);
 
+        self.sync_draw_order(graph);
+
+        // Interaction first, from where everything was drawn last frame - in
+        // phase with egui, which hit-tests against last frame's rects too.
+        // Node frames are registered before any content, so a widget inside a
+        // node wins the tie and a slider stays a slider. Under the command
+        // modifier a frame only senses clicks: click toggles the selection,
+        // while a drag falls through to the background.
+        let modifiers = canvas_ui.input(|input| input.modifiers);
+        let frame_sense = if modifiers.command {
+            Sense::click()
+        } else {
+            Sense::click_and_drag()
+        };
+        let frames: Vec<(NodeId, egui::Response)> = self
+            .draw_order
+            .iter()
+            .filter(|id| graph.contains(**id))
+            .filter_map(|id| {
+                let rect = self.layout.nodes.get(id)?.rect;
+                let response =
+                    canvas_ui.interact(rect, canvas_ui.id().with(("frame", id)), frame_sense);
+                Some((*id, response))
+            })
+            .collect();
+        let pointer = canvas_ui
+            .input(|input| input.pointer.latest_pos())
+            .map(|pointer| to_global.inverse() * pointer);
+        let mut events = Vec::new();
+        self.handle_input(
+            graph,
+            &frames,
+            &background,
+            pointer,
+            modifiers,
+            style,
+            &mut events,
+        );
+
         grid::draw_grid(
             canvas_ui.painter(),
             viewport,
@@ -108,7 +171,6 @@ impl Canvas {
         // slot is reserved now and filled once the nodes are drawn.
         let wires_slot = canvas_ui.painter().add(Shape::Noop);
 
-        self.sync_draw_order(graph);
         let mut layout = GraphLayout {
             to_global,
             panel_rect,
@@ -123,16 +185,13 @@ impl Canvas {
             let Some(node) = graph.node_mut(*id) else {
                 continue;
             };
+            let pos = self.drawn_pos(*id, node.pos);
             let measure = self.measures.get(id);
-            let off_screen = measure.is_some_and(|measure| {
-                !Rect::from_min_size(node.pos, measure.size).intersects(cull_bounds)
-            });
-            if off_screen {
-                // `is_some_and` above: the measure exists.
-                if let Some(measure) = measure {
-                    layout.nodes.insert(*id, measure.placed_at(node.pos));
-                    culled += 1;
-                }
+            if let Some(measure) = measure
+                && !Rect::from_min_size(pos, measure.size).intersects(cull_bounds)
+            {
+                layout.nodes.insert(*id, measure.placed_at(pos));
+                culled += 1;
                 continue;
             }
 
@@ -141,7 +200,8 @@ impl Canvas {
                 style,
                 content,
                 *id,
-                node,
+                &mut node.payload,
+                pos,
                 measure.map(|measure| measure.size),
             );
             if measure.is_none() {
@@ -189,6 +249,15 @@ impl Canvas {
             ),
         );
 
+        overlay::draw_overlay(
+            canvas_ui.painter(),
+            &layout,
+            &self.selection,
+            &self.gesture,
+            style,
+            self.view.zoom,
+        );
+
         // So a click or drag anywhere on the panel reaches the background.
         canvas_ui.expand_to_include_rect(viewport);
 
@@ -198,7 +267,7 @@ impl Canvas {
             wires: layout.wires.len(),
         };
         self.layout = layout;
-        CanvasResponse { stats }
+        CanvasResponse { events, stats }
     }
 
     /// Pan and zoom from the background's input. Middle or secondary drag
@@ -216,7 +285,10 @@ impl Canvas {
         if background.dragged_by(PointerButton::Middle)
             || background.dragged_by(PointerButton::Secondary)
         {
-            self.view.pan_by_screen(background.drag_delta());
+            // The response lives on the transformed layer, so its delta is in
+            // graph units.
+            self.view
+                .pan_by_screen(background.drag_delta() * self.view.zoom);
         }
 
         let Some(pointer) = ui.input(|input| input.pointer.latest_pos()) else {

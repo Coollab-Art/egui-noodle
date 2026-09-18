@@ -5,8 +5,8 @@
 
 use egui::{Color32, pos2};
 use egui_noodle::{
-    Canvas, CanvasStyle, ConnectionPolicy, Graph, InPin, InputId, InputSpec, NodeContent, NodeId,
-    OutPin, OutputId, OutputSpec,
+    Canvas, CanvasEvent, CanvasStyle, ConnectionPolicy, Graph, InPin, InputId, InputSpec,
+    NodeContent, NodeId, OutPin, OutputId, OutputSpec,
 };
 
 fn main() -> eframe::Result {
@@ -89,10 +89,21 @@ impl Demo {
 impl eframe::App for Demo {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let stats = self
+        let response = self
             .canvas
-            .show(ui, &mut self.graph, &mut self.content, &self.style)
-            .stats;
+            .show(ui, &mut self.graph, &mut self.content, &self.style);
+        let stats = response.stats;
+        for event in &response.events {
+            match event {
+                CanvasEvent::ContextMenuRequested { pos } => {
+                    let id = self
+                        .graph
+                        .add_node(node("New", &["in", "amount"], &["out"]), *pos);
+                    self.canvas.select_only(id);
+                }
+                other => self.graph.apply(other),
+            }
+        }
 
         egui::Window::new("Debug")
             .default_pos(pos2(10.0, 10.0))
@@ -115,6 +126,8 @@ impl eframe::App for Demo {
                     stats.nodes, stats.culled, stats.wires
                 ));
                 ui.label(format!("zoom {:.2}", self.canvas.view.zoom));
+                ui.label(format!("{} selected", self.canvas.selection().len()));
+                ui.checkbox(&mut self.style.snap_to_grid, "snap to grid");
             });
         ctx.request_repaint();
     }

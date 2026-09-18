@@ -34,6 +34,18 @@ pub struct CanvasStyle {
     pub wire_tolerance: f32,
 
     pub zoom_range: Rangef,
+
+    /// Drawn on a selected node's own rect, centred on its edge.
+    pub selection_stroke: Stroke,
+    /// Screen pixels, whatever the zoom.
+    pub box_select_stroke: Stroke,
+    pub box_select_fill: Color32,
+
+    /// Screen pixels within which a dragged node aligns with another.
+    pub snap_distance: f32,
+    pub snap_to_grid: bool,
+    /// Screen pixels, whatever the zoom.
+    pub snap_guide_stroke: Stroke,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +79,14 @@ impl Default for CanvasStyle {
             wire_tolerance: 0.3,
 
             zoom_range: Rangef::new(0.1, 3.0),
+
+            selection_stroke: Stroke::new(3.0, Color32::from_gray(220)),
+            box_select_stroke: Stroke::new(1.0, Color32::from_gray(200)),
+            box_select_fill: Color32::from_rgba_unmultiplied(200, 200, 200, 30),
+
+            snap_distance: 8.0,
+            snap_to_grid: false,
+            snap_guide_stroke: Stroke::new(1.0, Color32::from_rgb(255, 160, 60)),
         }
     }
 }

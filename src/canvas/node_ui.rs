@@ -1,5 +1,5 @@
 use super::{CanvasStyle, NodeContent, PinLayout, PinShape};
-use crate::{InputId, Node, NodeId, OutputId};
+use crate::{InputId, NodeId, OutputId};
 use egui::{
     Align, Color32, CornerRadius, Frame, Layout, Rect, Shape, Stroke, TextWrapMode, Ui, UiBuilder,
     Vec2, pos2,
@@ -13,8 +13,8 @@ pub(super) struct DrawnNode {
     pub outputs: Vec<PinLayout<OutputId>>,
 }
 
-/// Lays out and paints one node into `canvas_ui` (graph space), at the
-/// node's position.
+/// Lays out and paints one node into `canvas_ui` (graph space), with its
+/// top-left at `pos`.
 ///
 /// `known_size` is what the node measured last time; the frame it first
 /// appears it is laid out against `style.default_node_size` instead, as egui's
@@ -26,13 +26,14 @@ pub(super) fn draw_node<C: NodeContent>(
     style: &CanvasStyle,
     content: &mut C,
     id: NodeId,
-    node: &mut Node<C::Node>,
+    payload: &mut C::Node,
+    pos: egui::Pos2,
     known_size: Option<Vec2>,
 ) -> DrawnNode {
-    let inputs = content.inputs(&node.payload);
-    let outputs = content.outputs(&node.payload);
+    let inputs = content.inputs(payload);
+    let outputs = content.outputs(payload);
 
-    let max_rect = Rect::from_min_size(node.pos, known_size.unwrap_or(style.default_node_size));
+    let max_rect = Rect::from_min_size(pos, known_size.unwrap_or(style.default_node_size));
     let mut builder = UiBuilder::new().max_rect(max_rect).id_salt(id);
     if known_size.is_none() {
         builder = builder.sizing_pass();
@@ -55,7 +56,7 @@ pub(super) fn draw_node<C: NodeContent>(
         .show(&mut node_ui, |ui| {
             header_rect = Frame::NONE
                 .inner_margin(style.header_padding)
-                .show(ui, |ui| content.header(ui, id, &mut node.payload))
+                .show(ui, |ui| content.header(ui, id, payload))
                 .response
                 .rect;
 
@@ -67,7 +68,7 @@ pub(super) fn draw_node<C: NodeContent>(
                             input_rows.push(row.response.rect);
                         }
                     });
-                    content.body(ui, id, &mut node.payload);
+                    content.body(ui, id, payload);
                     ui.with_layout(Layout::top_down(Align::Max), |ui| {
                         for output in &outputs {
                             let row = ui.horizontal(|ui| content.output_row(ui, output));
