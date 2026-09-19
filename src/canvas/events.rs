@@ -4,14 +4,23 @@ use egui::Pos2;
 /// What the user did on the canvas this frame. The canvas never changes the
 /// graph itself: the application applies these - directly with
 /// [`Graph::apply`], or by turning each into a command it can undo. See
-/// `post-mortems/1-Application Owns the Model.md`.
+/// `1-Application Owns the Model.md`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanvasEvent {
     /// A drag ended, or nodes finished sliding apart to make room. One event
     /// per drag, so one undo entry per drag.
     NodesMoved { moves: Vec<NodeMove> },
-    /// The delete key, with these nodes selected.
-    DeleteRequested { nodes: Vec<NodeId> },
+    /// The delete key with these selected, or a cut stroke through them.
+    /// `wires` never touches a node in `nodes` - those go with the node.
+    /// `bridges` are the wires that close the chains the removed nodes sat
+    /// in (`A -> B -> C` less `B` is `A -> C`), computed by
+    /// [`Graph::bridges_over`] from each node's `splice_pins`. Why the event
+    /// carries them: `1-Application Owns the Model.md`.
+    DeleteRequested {
+        nodes: Vec<NodeId>,
+        wires: Vec<Wire>,
+        bridges: Vec<Wire>,
+    },
     /// A wire was dropped on a pin. `policy` is the input's, as the
     /// application declared it.
     ConnectRequested {
@@ -19,14 +28,11 @@ pub enum CanvasEvent {
         to: InPin,
         policy: ConnectionPolicy,
     },
-    /// A wire was picked up off its input and dropped elsewhere, cut, or
-    /// right-clicked.
-    DisconnectRequested { wire: Wire },
     /// A new wire, started on `from`, was released over empty canvas at this
     /// graph-space position - the application may offer a node to complete it.
     WireDropped { from: AnyPin, pos: Pos2 },
-    /// The `+` on a hovered wire was clicked - the application may offer a
-    /// node to splice in, placed around `pos`.
+    /// The `+` on a hovered wire was clicked, or the wire double-clicked -
+    /// the application may offer a node to splice in, placed around `pos`.
     WireInsertRequested { wire: Wire, pos: Pos2 },
     /// A node was dropped on a wire: splice it in, `input` fed by the wire's
     /// source and `output` feeding the wire's target. Follows the
@@ -62,18 +68,27 @@ impl<N> Graph<N> {
                     self.set_pos(node_move.id, node_move.to);
                 }
             }
-            CanvasEvent::DeleteRequested { nodes } => {
+            CanvasEvent::DeleteRequested {
+                nodes,
+                wires,
+                bridges,
+            } => {
                 for id in nodes {
                     self.remove_node(*id);
+                }
+                for wire in wires {
+                    self.disconnect(*wire);
+                }
+                // The removed node's wire into each bridged target is gone,
+                // so there is nothing left to displace whatever the policy.
+                for bridge in bridges {
+                    let _ = self.connect(bridge.from, bridge.to, ConnectionPolicy::Multiple);
                 }
             }
             CanvasEvent::ConnectRequested { from, to, policy } => {
                 // A stale end is the one way this fails, and there is nothing
                 // to do about it here: the wire simply is not made.
                 let _ = self.connect(*from, *to, *policy);
-            }
-            CanvasEvent::DisconnectRequested { wire } => {
-                self.disconnect(*wire);
             }
             CanvasEvent::NodeDroppedOnWire {
                 wire,

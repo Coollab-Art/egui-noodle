@@ -6,7 +6,10 @@ use egui::{Color32, Ui};
 /// that should change the graph is reported back through the canvas's events
 /// and applied by the application afterwards.
 ///
-/// The `Ui` handed to each method is in graph space, inside the node's frame.
+/// The `Ui` handed to each method is inside the node's frame, with its style
+/// pre-scaled so text stays crisp when zoomed in: sizes read from the `Ui`
+/// (`ui.spacing()`, text styles) are right as they are, and a hard-coded size
+/// must be multiplied by [`content_scale`](super::content_scale).
 pub trait NodeContent {
     /// What the application stores per node - `Graph<Self::Node>`.
     type Node;
@@ -15,6 +18,13 @@ pub trait NodeContent {
     fn outputs(&mut self, node: &Self::Node) -> Vec<OutputSpec>;
 
     fn title(&mut self, node: &Self::Node) -> String;
+
+    /// The header's fill, per node - a category colour, say. `None` takes the
+    /// style's `header_fill`.
+    fn header_color(&mut self, node: &Self::Node) -> Option<Color32> {
+        let _ = node;
+        None
+    }
 
     /// The header row. Defaults to the title as a non-selectable label - a
     /// selectable one would swallow the drag that moves the node.
@@ -53,7 +63,7 @@ pub trait NodeContent {
 pub struct InputSpec {
     pub id: InputId,
     pub label: String,
-    /// The pin's fill; a wire takes the mix of its two ends' colours.
+    /// The pin's fill.
     pub color: Color32,
     pub policy: ConnectionPolicy,
 }

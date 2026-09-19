@@ -111,12 +111,12 @@ impl eframe::App for Demo {
                         ConnectionPolicy::Single,
                         OutputId(0),
                     );
-                    self.canvas.make_room(id, wire.to.node);
+                    self.canvas.make_room(id, *wire);
                     self.canvas.select_only(id);
                 }
                 CanvasEvent::NodeDroppedOnWire { wire, node, .. } => {
                     self.graph.apply(event);
-                    self.canvas.make_room(*node, wire.to.node);
+                    self.canvas.make_room(*node, *wire);
                 }
                 // What an application's node menu would do: complete the wire
                 // with a new node.
@@ -153,8 +153,21 @@ impl eframe::App for Demo {
                     "{} nodes, {} culled, {} wires",
                     stats.nodes, stats.culled, stats.wires
                 ));
-                ui.label(format!("zoom {:.2}", self.canvas.view.zoom));
-                ui.label(format!("{} selected", self.canvas.selection().len()));
+                ui.label(format!("zoom {:.3}", self.canvas.view.zoom));
+                if let Some(id) = self.canvas.selection().nodes.first()
+                    && let Some(node) = self.canvas.layout().nodes.get(id)
+                {
+                    ui.label(format!(
+                        "selected node {:.3} x {:.3}",
+                        node.rect.width(),
+                        node.rect.height()
+                    ));
+                }
+                ui.label(format!(
+                    "{} nodes and {} wires selected",
+                    self.canvas.selection().nodes.len(),
+                    self.canvas.selection().wires.len()
+                ));
                 ui.checkbox(&mut self.style.snap_to_grid, "snap to grid");
             });
         ctx.request_repaint();

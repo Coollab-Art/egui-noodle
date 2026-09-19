@@ -1,5 +1,5 @@
 use super::WireRouting;
-use egui::{Color32, CornerRadius, Margin, Rangef, Stroke, Vec2};
+use egui::{Color32, Margin, Rangef, Stroke, Vec2};
 
 /// Everything about how a canvas looks. Plain fields, so an application
 /// builds one from its own theme.
@@ -40,17 +40,30 @@ pub struct CanvasStyle {
 
     pub zoom_range: Rangef,
 
-    /// Drawn on a selected node's own rect, centred on its edge.
-    pub selection_stroke: Stroke,
+    /// The mark on a selected node - drawn on its own rect, centred on its
+    /// edge, under its pins - and, behind a selected wire, how far the
+    /// outline stands out either side of it.
+    pub selection_width: f32,
+    pub selection_color: SelectionColor,
     /// Screen pixels, whatever the zoom.
     pub box_select_stroke: Stroke,
     pub box_select_fill: Color32,
 
     /// Screen pixels within which a dragged node aligns with another.
     pub snap_distance: f32,
+    /// Only nodes in view and within this many screen pixels of the dragged
+    /// group are candidates to align with, so a busy graph does not snap to
+    /// everything.
+    pub snap_search_distance: f32,
     pub snap_to_grid: bool,
-    /// Screen pixels, whatever the zoom.
+    /// Drawn between the two aligned nodes. Screen pixels, whatever the zoom.
     pub snap_guide_stroke: Stroke,
+
+    /// Dragging within this many screen pixels of the panel's edge pans the
+    /// view, at up to `edge_pan_speed` screen pixels per second at the edge
+    /// itself.
+    pub edge_pan_margin: f32,
+    pub edge_pan_speed: f32,
 
     /// The `+` shown on a hovered wire, in graph units.
     pub insert_button_size: f32,
@@ -66,12 +79,15 @@ pub enum PinShape {
     Square,
 }
 
-impl CanvasStyle {
-    /// The node frame's corners; the selection halo uses the same so the two
-    /// coincide exactly.
-    pub(super) fn corner_radius(&self) -> CornerRadius {
-        CornerRadius::same(self.node_rounding.round() as u8)
-    }
+/// What colour marks a selected node or wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionColor {
+    /// The same colour whatever is selected.
+    Fixed(Color32),
+    /// The selected thing's own colour: a node's header, a wire's own colour
+    /// lightened - a wire outlined in exactly its own colour would read as
+    /// merely thicker.
+    Own,
 }
 
 /// A stroke whose width is given in screen pixels, made `zoom`-independent
@@ -108,13 +124,18 @@ impl Default for CanvasStyle {
 
             zoom_range: Rangef::new(0.1, 3.0),
 
-            selection_stroke: Stroke::new(3.0, Color32::from_gray(220)),
+            selection_width: 3.0,
+            selection_color: SelectionColor::Fixed(Color32::from_gray(220)),
             box_select_stroke: Stroke::new(1.0, Color32::from_gray(200)),
             box_select_fill: Color32::from_rgba_unmultiplied(200, 200, 200, 30),
 
             snap_distance: 8.0,
+            snap_search_distance: 250.0,
             snap_to_grid: false,
-            snap_guide_stroke: Stroke::new(1.0, Color32::from_rgb(255, 160, 60)),
+            snap_guide_stroke: Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 160, 60, 90)),
+
+            edge_pan_margin: 40.0,
+            edge_pan_speed: 800.0,
 
             insert_button_size: 14.0,
             insert_button_fill: Color32::from_gray(90),

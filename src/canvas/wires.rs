@@ -2,19 +2,23 @@
 //! the hit-testing that runs against the exact polyline that was drawn.
 //!
 //! Wires are orthogonal - horizontal, vertical, horizontal - with rounded
-//! corners. One polyline serves drawing, hit-testing and cutting alike, so
-//! what the user grabs is by construction what they see. See
-//! `post-mortems/3-Orthogonal Wires.md`.
+//! corners. One polyline serves drawing, hit-testing, box-selecting and
+//! cutting alike, so what the user grabs is by construction what they see.
+//! See `3-Orthogonal Wires.md`.
 
-use egui::{Pos2, Rect, Vec2, pos2};
+use egui::{Pos2, Rangef, Rect, Vec2, pos2};
 
 /// The geometry knobs shared by every wire on a canvas.
 pub struct WireRouting {
-    /// How far a wire runs straight out of its source pin (and straight into
-    /// its target, for a backward wire) before turning.
+    /// How far a wire runs straight out of its source pin, and straight into
+    /// its target, before it may turn. The route is computed between the ends
+    /// of those two stubs rather than between the pins - except between two
+    /// nodes that sit side by side, which have nothing to keep the wire clear
+    /// of and connect straight across.
     pub stub: f32,
     pub corner_radius: f32,
-    /// How far above or below the two nodes a backward wire's return run sits.
+    /// How far above or below the two nodes a backward wire's return run
+    /// sits, when it has to clear them both.
     pub backward_clearance: f32,
 }
 
@@ -43,37 +47,57 @@ pub struct WireEndpoints {
 
 /// The corner points of a wire's path, before rounding. Graph space.
 ///
-/// A forward wire (target to the right of the source) turns twice: out of the
-/// source, down or up, and into the target. A backward wire turns four times,
-/// detouring around both nodes on whichever side is nearer. `lane_offset`
-/// shifts the first vertical run so sibling wires leaving one node do not
-/// share it.
+/// A wire turns twice - out of the source, down or up mid-gap, and into the
+/// target - whenever it can run straight across. It turns four times, looping
+/// back past both nodes, only when it cannot: a target to the left of its
+/// source, or one below or above it and too close to leave room for the two
+/// stubs. `lane_offset` shifts the first vertical run so sibling wires leaving
+/// one node do not share it.
 pub fn route_wire(ends: &WireEndpoints, routing: &WireRouting, lane_offset: f32) -> Vec<Pos2> {
     let (from, to) = (ends.from, ends.to);
+    let (out_x, in_x) = (from.x + routing.stub, to.x - routing.stub);
+    let gap = vertical_gap(ends.from_node, ends.to_node);
 
-    if to.x > from.x {
+    // Straight across when the two stubs leave room between them - or, even
+    // when they do not, when the nodes sit side by side. Squeezing the
+    // vertical run between two close pins reads fine there; it is a target
+    // below or above its source that needs the stubs, or the wire runs down
+    // through both pins and reads as one straight line touching them.
+    let side_by_side = to.x > from.x && gap.is_none();
+    if in_x > out_x || side_by_side {
         if from.y == to.y {
             return vec![from, to];
         }
-        // The vertical sits one stub after the source rather than mid-gap, so
-        // a node's inputs read as a horizontal bus coming in. Mid-gap only
-        // when the nodes are too close for a full stub.
-        let gap = to.x - from.x;
-        let vertical_x = (from.x + routing.stub.min(gap / 2.0) + lane_offset).clamp(from.x, to.x);
+        // The vertical sits mid-gap, so the two horizontal runs read as equal
+        // stubs out of the source and into the target.
+        let lane = if in_x > out_x {
+            Rangef::new(out_x, in_x)
+        } else {
+            Rangef::new(from.x, to.x)
+        };
+        let vertical_x = lane.clamp((from.x + to.x) / 2.0 + lane_offset);
         return vec![from, pos2(vertical_x, from.y), pos2(vertical_x, to.y), to];
     }
 
-    // Backward: out of the source, around both nodes on the nearer side, and
-    // back in from the left of the target.
-    let out_x = from.x + routing.stub + lane_offset;
-    let in_x = to.x - routing.stub;
-    let above = ends.from_node.top().min(ends.to_node.top()) - routing.backward_clearance;
-    let below = ends.from_node.bottom().max(ends.to_node.bottom()) + routing.backward_clearance;
-    let middle_y = (from.y + to.y) / 2.0;
-    let return_y = if middle_y - above <= below - middle_y {
-        above
-    } else {
-        below
+    // Out of the source, back past both nodes, and in from the left of the
+    // target. The return run goes between the two nodes whenever they leave a
+    // gap - that lane crosses neither of them and keeps the wire in the space
+    // the eye already reads as between them - and otherwise over or under
+    // both, on the side nearer the pins.
+    let out_x = out_x + lane_offset;
+    let return_y = match gap {
+        Some(gap) => gap.center(),
+        None => {
+            let above = ends.from_node.top().min(ends.to_node.top()) - routing.backward_clearance;
+            let below =
+                ends.from_node.bottom().max(ends.to_node.bottom()) + routing.backward_clearance;
+            let middle_y = (from.y + to.y) / 2.0;
+            if middle_y - above <= below - middle_y {
+                above
+            } else {
+                below
+            }
+        }
     };
     vec![
         from,
@@ -83,6 +107,18 @@ pub fn route_wire(ends: &WireEndpoints, routing: &WireRouting, lane_offset: f32)
         pos2(in_x, to.y),
         to,
     ]
+}
+
+/// The clear vertical space between two rects, or `None` when they overlap on
+/// that axis.
+fn vertical_gap(a: Rect, b: Rect) -> Option<Rangef> {
+    if a.top() > b.bottom() {
+        Some(Rangef::new(b.bottom(), a.top()))
+    } else if b.top() > a.bottom() {
+        Some(Rangef::new(a.bottom(), b.top()))
+    } else {
+        None
+    }
 }
 
 /// Replaces every interior corner of `route` with an arc of the given radius,
@@ -185,6 +221,31 @@ pub fn polyline_crosses_segment(polyline: &[Pos2], a: Pos2, b: Pos2) -> bool {
         .any(|segment| segments_intersect(segment[0], segment[1], a, b))
 }
 
+/// Whether any part of the polyline lies in or crosses `rect`.
+pub fn polyline_intersects_rect(polyline: &[Pos2], rect: Rect) -> bool {
+    match polyline {
+        [] => false,
+        [only] => rect.contains(*only),
+        _ => polyline
+            .windows(2)
+            .any(|segment| segment_intersects_rect(segment[0], segment[1], rect)),
+    }
+}
+
+/// Whether the segment `a`-`b` has a point inside `rect` or on its edge.
+pub fn segment_intersects_rect(a: Pos2, b: Pos2, rect: Rect) -> bool {
+    if rect.contains(a) || rect.contains(b) {
+        return true;
+    }
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    (0..4).any(|i| segments_intersect(a, b, corners[i], corners[(i + 1) % 4]))
+}
+
 /// Proper crossings and touching endpoints alike.
 fn segments_intersect(a: Pos2, b: Pos2, c: Pos2, d: Pos2) -> bool {
     let side_of_cd_a = orientation(c, d, a);
@@ -259,13 +320,13 @@ mod tests {
     }
 
     #[test]
-    fn a_forward_wire_turns_one_stub_after_its_source() {
+    fn a_forward_wire_turns_mid_gap() {
         let route = route_wire(
             &forward_ends(pos2(0.0, 0.0), pos2(200.0, 100.0)),
             &ROUTING,
             0.0,
         );
-        assert_eq!(route[1].x, ROUTING.stub);
+        assert_eq!(route[1].x, 100.0);
     }
 
     #[test]
@@ -278,29 +339,92 @@ mod tests {
         assert_eq!(route, vec![pos2(0.0, 50.0), pos2(200.0, 50.0)]);
     }
 
-    /// Nodes closer together than two stubs: the vertical sits mid-gap rather
-    /// than overshooting the target.
     #[test]
-    fn a_forward_wire_between_close_nodes_turns_mid_gap() {
-        let route = route_wire(
-            &forward_ends(pos2(0.0, 0.0), pos2(10.0, 100.0)),
-            &ROUTING,
-            0.0,
-        );
-        assert_eq!(route.len(), 4);
-        assert_eq!(route[1].x, 5.0);
-        assert!(all_finite(&route));
-    }
-
-    #[test]
-    fn a_lane_offset_shifts_the_vertical_run() {
+    fn a_lane_offset_shifts_the_vertical_run_but_never_into_a_stub() {
         let ends = forward_ends(pos2(0.0, 0.0), pos2(200.0, 100.0));
         let base = route_wire(&ends, &ROUTING, 0.0);
         let shifted = route_wire(&ends, &ROUTING, 12.0);
         assert_eq!(shifted[1].x, base[1].x + 12.0);
+        let overshooting = route_wire(&ends, &ROUTING, 500.0);
+        assert_eq!(overshooting[1].x, 200.0 - ROUTING.stub);
+        assert!(all_finite(&overshooting));
     }
 
-    /// Target left of the source: out, around both nodes, and back in.
+    /// Two nodes side by side, the target barely to the right of the source:
+    /// no room for the two stubs, but nothing to loop around either, so the
+    /// wire turns once each way and goes straight across.
+    #[test]
+    fn a_target_beside_its_source_is_routed_straight_across() {
+        let from_node = Rect::from_min_max(pos2(0.0, 0.0), pos2(200.0, 100.0));
+        let to_node = Rect::from_min_max(pos2(210.0, 40.0), pos2(400.0, 140.0));
+        let ends = WireEndpoints {
+            from: pos2(200.0, 20.0),
+            to: pos2(210.0, 60.0),
+            from_node,
+            to_node,
+        };
+
+        let route = route_wire(&ends, &ROUTING, 0.0);
+
+        assert_eq!(route.len(), 4);
+        assert_eq!(route[1].x, 205.0, "the vertical sits between the two pins");
+        assert_eq!(route[1].y, 20.0);
+        assert_eq!(route[2].y, 60.0);
+    }
+
+    /// A target barely to the right of its source but *below* it: there is no
+    /// room between the two stubs, so the wire takes the four-turn route
+    /// rather than collapsing into one vertical run straight through both
+    /// pins.
+    #[test]
+    fn a_target_within_a_stub_below_its_source_is_not_routed_straight_down() {
+        let from_node = Rect::from_min_max(pos2(0.0, 0.0), pos2(200.0, 100.0));
+        let to_node = Rect::from_min_max(pos2(204.0, 200.0), pos2(400.0, 300.0));
+        let ends = WireEndpoints {
+            from: pos2(200.0, 50.0),
+            to: pos2(204.0, 250.0),
+            from_node,
+            to_node,
+        };
+
+        let route = route_wire(&ends, &ROUTING, 0.0);
+
+        assert_eq!(route.len(), 6);
+        assert_eq!(route[1].x, 220.0, "leaves by a stub");
+        assert_eq!(route[4].x, 184.0, "arrives from a stub out");
+        assert_eq!(route[2].y, 150.0, "returning between the two nodes");
+    }
+
+    /// Nodes one above the other, as a wire feeding a node up and to the
+    /// left finds them: the return run takes the gap between them rather than
+    /// going around the outside of both.
+    #[test]
+    fn a_backward_wire_returns_between_nodes_that_leave_a_gap() {
+        let from_node = Rect::from_min_max(pos2(0.0, 200.0), pos2(200.0, 300.0));
+        let to_node = Rect::from_min_max(pos2(-100.0, 0.0), pos2(100.0, 100.0));
+        let ends = WireEndpoints {
+            from: pos2(200.0, 250.0),
+            to: pos2(-100.0, 50.0),
+            from_node,
+            to_node,
+        };
+
+        let route = route_wire(&ends, &ROUTING, 0.0);
+
+        assert_eq!(route.len(), 6);
+        let return_run_y = route[2].y;
+        assert_eq!(route[3].y, return_run_y);
+        assert_eq!(return_run_y, 150.0, "midway between the two nodes");
+        for point in &route[1..5] {
+            assert!(
+                !from_node.contains(*point) && !to_node.contains(*point),
+                "{point:?} is inside a node"
+            );
+        }
+    }
+
+    /// Target left of the source and level with it: no gap to return
+    /// through, so the wire goes around both nodes.
     #[test]
     fn a_backward_wire_detours_around_both_nodes() {
         let from_node = Rect::from_min_max(pos2(100.0, 0.0), pos2(200.0, 40.0));
@@ -483,6 +607,33 @@ mod tests {
         // The arc's midpoint sits radius * (1 - 1/sqrt(2)), about 0.29 radius,
         // inside the sharp corner.
         assert!(distance_to_polyline(&route, arc_midpoint) > radius * 0.25);
+    }
+
+    #[test]
+    fn a_polyline_meets_a_rect_by_entering_it_or_crossing_it() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+        // A vertex inside.
+        assert!(polyline_intersects_rect(
+            &[pos2(-50.0, 50.0), pos2(50.0, 50.0)],
+            rect
+        ));
+        // Straight through, both ends outside.
+        assert!(polyline_intersects_rect(
+            &[pos2(-50.0, 50.0), pos2(150.0, 50.0)],
+            rect
+        ));
+        // Passing beside.
+        assert!(!polyline_intersects_rect(
+            &[pos2(-50.0, 150.0), pos2(150.0, 150.0)],
+            rect
+        ));
+        // Diagonal clipping one corner, both ends outside.
+        assert!(segment_intersects_rect(
+            pos2(-10.0, 50.0),
+            pos2(50.0, -10.0),
+            rect
+        ));
+        assert!(!polyline_intersects_rect(&[], rect));
     }
 
     #[test]

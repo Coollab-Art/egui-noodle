@@ -1,4 +1,4 @@
-use super::distance_to_polyline;
+use super::{Selection, distance_to_polyline, polyline_intersects_rect};
 use crate::{AnyPin, ConnectionPolicy, InPin, InputId, NodeId, OutPin, OutputId, Wire};
 use egui::{Color32, Pos2, Rect, Vec2, emath::TSTransform};
 use std::collections::BTreeMap;
@@ -21,6 +21,9 @@ pub struct GraphLayout {
 #[derive(Clone, Debug)]
 pub struct NodeLayout {
     pub rect: Rect,
+    /// What the header was filled with, which is also what marks the node as
+    /// selected under `SelectionColor::Own`.
+    pub header_color: Color32,
     pub inputs: Vec<InputPinLayout>,
     pub outputs: Vec<OutputPinLayout>,
     /// What `NodeContent::splice_pins` said: the pins this node would use if
@@ -50,6 +53,8 @@ pub struct OutputPinLayout {
 #[derive(Clone, Debug)]
 pub struct WireLayout {
     pub wire: Wire,
+    /// Its source output pin's, so a wire reads as carrying what that output
+    /// produces.
     /// The output pin's centre, where the wire starts.
     pub from: Pos2,
     /// The input pin's centre, where it ends.
@@ -96,10 +101,27 @@ impl NodeLayout {
         inputs.chain(outputs)
     }
 
+    /// What colour a pin of this node was drawn in.
+    pub fn pin_color(&self, pin: AnyPin) -> Option<Color32> {
+        match pin {
+            AnyPin::In(pin) => self
+                .inputs
+                .iter()
+                .find(|layout| layout.id == pin.input)
+                .map(|layout| layout.color),
+            AnyPin::Out(pin) => self
+                .outputs
+                .iter()
+                .find(|layout| layout.id == pin.output)
+                .map(|layout| layout.color),
+        }
+    }
+
     /// The same geometry moved by `offset`.
     pub(super) fn translated(&self, offset: Vec2, culled: bool) -> NodeLayout {
         NodeLayout {
             rect: self.rect.translate(offset),
+            header_color: self.header_color,
             inputs: self
                 .inputs
                 .iter()
@@ -191,6 +213,20 @@ impl GraphLayout {
             .map(|(id, _)| *id)
     }
 
+    /// Every node and wire the rect touches - what a box selection over it
+    /// selects.
+    pub fn contents_of(&self, rect: Rect) -> Selection {
+        Selection {
+            nodes: self.nodes_intersecting(rect).collect(),
+            wires: self
+                .wires
+                .iter()
+                .filter(|wire| polyline_intersects_rect(&wire.polyline, rect))
+                .map(|wire| wire.wire)
+                .collect(),
+        }
+    }
+
     pub fn wire(&self, wire: Wire) -> Option<&WireLayout> {
         self.wires.iter().find(|drawn| drawn.wire == wire)
     }
@@ -219,10 +255,7 @@ impl GraphLayout {
     }
 
     pub fn pin_color(&self, pin: AnyPin) -> Option<Color32> {
-        match pin {
-            AnyPin::In(pin) => self.input(pin).map(|layout| layout.color),
-            AnyPin::Out(pin) => self.output(pin).map(|layout| layout.color),
-        }
+        self.nodes.get(&pin.node())?.pin_color(pin)
     }
 }
 
@@ -234,6 +267,7 @@ mod tests {
     fn node(rect: Rect) -> NodeLayout {
         NodeLayout {
             rect,
+            header_color: Color32::WHITE,
             inputs: vec![],
             outputs: vec![],
             splice_pins: None,
@@ -266,6 +300,40 @@ mod tests {
         assert_eq!(layout.node_at(pos2(75.0, 75.0)), Some(above));
         assert_eq!(layout.node_at(pos2(25.0, 25.0)), Some(below));
         assert_eq!(layout.node_at(pos2(500.0, 500.0)), None);
+    }
+
+    #[test]
+    fn a_box_selects_the_wires_it_touches_along_with_the_nodes() {
+        let wire_layout = |index: u64, polyline: Vec<Pos2>| WireLayout {
+            wire: Wire {
+                from: OutPin {
+                    node: NodeId(index),
+                    output: OutputId(0),
+                },
+                to: InPin {
+                    node: NodeId(index + 100),
+                    input: InputId(0),
+                },
+            },
+            from: polyline[0],
+            to: polyline[polyline.len() - 1],
+            polyline,
+            color: Color32::WHITE,
+        };
+        let mut layout = layout_with(vec![(
+            NodeId(7),
+            node(Rect::from_min_size(pos2(55.0, 100.0), vec2(20.0, 20.0))),
+        )]);
+        layout.wires = vec![
+            wire_layout(0, vec![pos2(0.0, 10.0), pos2(200.0, 10.0)]),
+            wire_layout(1, vec![pos2(0.0, 500.0), pos2(200.0, 500.0)]),
+        ];
+
+        let selection = layout.contents_of(Rect::from_min_max(pos2(50.0, 0.0), pos2(60.0, 110.0)));
+
+        assert_eq!(selection.wires.len(), 1);
+        assert!(selection.wires.contains(&layout.wires[0].wire));
+        assert!(selection.nodes.contains(&NodeId(7)));
     }
 
     #[test]
