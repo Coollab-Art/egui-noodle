@@ -2,7 +2,7 @@
 //! of a nearby node, or a wire that would become a straight line.
 
 use super::{Canvas, CanvasStyle};
-use crate::{Graph, NodeId};
+use crate::{Graph, NodeIdentifier};
 use egui::{Pos2, Rangef, Rect, Vec2};
 use std::collections::BTreeMap;
 
@@ -74,15 +74,15 @@ fn snap_axis(
     }
 }
 
-impl Canvas {
+impl<I: NodeIdentifier> Canvas<I> {
     /// Snaps the dragged group as a whole: to the grid when that is on, then
     /// to the same edge of a nearby node (left to left, top to top, ...) or
     /// to a straight run for a wire between the group and a node outside it.
     /// Reads where everything was drawn last frame.
     pub(super) fn snap_targets<N>(
         &self,
-        graph: &Graph<N>,
-        targets: &BTreeMap<NodeId, Pos2>,
+        graph: &Graph<N, I>,
+        targets: &BTreeMap<I, Pos2>,
         style: &CanvasStyle,
     ) -> Snap {
         let group = targets
@@ -116,7 +116,7 @@ impl Canvas {
     fn edge_alignments(
         &self,
         group: Rect,
-        targets: &BTreeMap<NodeId, Pos2>,
+        targets: &BTreeMap<I, Pos2>,
         style: &CanvasStyle,
     ) -> (Vec<Alignment>, Vec<Alignment>) {
         let search = group.expand(style.snap_search_distance / self.view.zoom);
@@ -164,13 +164,13 @@ impl Canvas {
     /// on this axis.
     fn straight_wire_alignments<N>(
         &self,
-        graph: &Graph<N>,
-        targets: &BTreeMap<NodeId, Pos2>,
+        graph: &Graph<N, I>,
+        targets: &BTreeMap<I, Pos2>,
         grid_offset: f32,
     ) -> Vec<Alignment> {
         // Where a pin of a dragged node is being drawn, rather than where it
         // was drawn last frame.
-        let dragged_pin_y = |pin_y: f32, node: NodeId| {
+        let dragged_pin_y = |pin_y: f32, node: I| {
             let layout = self.layout.nodes.get(&node)?;
             let target = targets.get(&node)?;
             Some(pin_y - layout.rect.top() + target.y + grid_offset)

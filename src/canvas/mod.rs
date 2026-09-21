@@ -28,40 +28,39 @@ pub use style::*;
 pub use view::*;
 pub use wires::*;
 
-use crate::{Graph, NodeId};
-use egui::{LayerId, Painter, Pos2, Rect, Sense, Shape, Ui, UiBuilder, emath::TSTransform};
+use crate::{Graph, NodeIdentifier};
+use egui::{LayerId, Painter, Pos2, Rect, Sense, Shape, Ui, UiBuilder, Vec2, emath::TSTransform};
 use gestures::{Gesture, Interaction};
 use room::Room;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One node-graph view. Keep it across frames; hand it the graph each frame.
-#[derive(Default)]
-pub struct Canvas {
+pub struct Canvas<I> {
     pub view: ViewState,
     /// What was drawn last frame. Gestures and application hit-testing read
     /// this, one frame behind; it is also where an off-screen node's geometry
     /// comes from when its content is not built.
-    layout: GraphLayout,
+    layout: GraphLayout<I>,
     /// Back to front. Nodes the graph gained are appended on top; nodes it
     /// lost are dropped.
-    draw_order: Vec<NodeId>,
+    draw_order: Vec<I>,
     /// The graph's topology revision `draw_order` was last synced against.
     synced_topology: Option<u64>,
-    selection: Selection,
-    gesture: Gesture,
-    hovered: Hovered,
-    room: Option<Room>,
+    selection: Selection<I>,
+    gesture: Gesture<I>,
+    hovered: Hovered<I>,
+    room: Option<Room<I>>,
     /// Where the nodes reported in this frame's `NodesMoved` are drawn, since
     /// the graph only learns of the move after `show` returns. Without it a
     /// dropped node would flash back to where it started for one frame. See
     /// `1-Application Owns the Model.md` on the transient offset.
-    settled: BTreeMap<NodeId, Pos2>,
+    settled: BTreeMap<I, Pos2>,
 }
 
-pub struct CanvasResponse {
+pub struct CanvasResponse<I> {
     /// In the order they happened. Apply them to the graph, or turn them
     /// into commands.
-    pub events: Vec<CanvasEvent>,
+    pub events: Vec<CanvasEvent<I>>,
     pub stats: CanvasStats,
 }
 
@@ -74,27 +73,44 @@ pub struct CanvasStats {
     pub wires: usize,
 }
 
-impl Canvas {
+// By hand: a derive would demand `I: Default`, which an id has no reason to be.
+impl<I> Default for Canvas<I> {
+    fn default() -> Self {
+        Self {
+            view: ViewState::default(),
+            layout: GraphLayout::default(),
+            draw_order: Vec::new(),
+            synced_topology: None,
+            selection: Selection::default(),
+            gesture: Gesture::default(),
+            hovered: Hovered::default(),
+            room: None,
+            settled: BTreeMap::new(),
+        }
+    }
+}
+
+impl<I: NodeIdentifier> Canvas<I> {
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Where everything was drawn last frame.
-    pub fn layout(&self) -> &GraphLayout {
+    pub fn layout(&self) -> &GraphLayout<I> {
         &self.layout
     }
 
-    pub fn selection(&self) -> &Selection {
+    pub fn selection(&self) -> &Selection<I> {
         &self.selection
     }
 
-    pub fn select_only(&mut self, id: NodeId) {
+    pub fn select_only(&mut self, id: I) {
         self.selection.clear();
         self.selection.nodes.insert(id);
     }
 
     /// Selects these nodes and nothing else.
-    pub fn set_selection(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
+    pub fn set_selection(&mut self, nodes: impl IntoIterator<Item = I>) {
         self.selection = Selection {
             nodes: nodes.into_iter().collect(),
             wires: BTreeSet::new(),
@@ -102,17 +118,64 @@ impl Canvas {
     }
 
     /// What the pointer is over while nothing is being dragged.
-    pub fn hovered(&self) -> Hovered {
+    pub fn hovered(&self) -> Hovered<I> {
         self.hovered
     }
 
-    pub fn show<C: NodeContent>(
+    /// The size a node would be drawn at, without drawing it: laid out on an
+    /// invisible child of `ui`, at zoom 1. For placing a node before it
+    /// exists - centring it on a point, or making room for it in a wire
+    /// ([`Canvas::make_room`]) - rather than guessing from `default_node_size`.
+    ///
+    /// Laid out the way a shown node is: a sizing pass first, then against
+    /// the size that came out, until it stops changing. One pass alone can be
+    /// a few pixels off what the node settles at once it is drawn.
+    pub fn measure_node<C: NodeContent<Id = I>>(
+        &self,
+        ui: &mut Ui,
+        content: &mut C,
+        id: I,
+        node: &C::Node,
+        style: &CanvasStyle,
+    ) -> Vec2 {
+        const SETTLE_PASSES: usize = 4;
+        let mut known_size = None;
+        for _ in 0..SETTLE_PASSES {
+            let mut measuring_ui = ui.new_child(
+                UiBuilder::new()
+                    .id_salt("egui_noodle_measure")
+                    .max_rect(Rect::EVERYTHING)
+                    .invisible(),
+            );
+            let size = node_ui::draw_node(
+                &mut measuring_ui,
+                style,
+                1.0,
+                content,
+                node,
+                node_ui::NodePlacement {
+                    id,
+                    pos: Pos2::ZERO,
+                    known_size,
+                },
+            )
+            .rect
+            .size();
+            if known_size == Some(size) {
+                break;
+            }
+            known_size = Some(size);
+        }
+        known_size.unwrap_or(style.default_node_size)
+    }
+
+    pub fn show<C: NodeContent<Id = I>>(
         &mut self,
         ui: &mut Ui,
-        graph: &mut Graph<C::Node>,
+        graph: &Graph<C::Node, I>,
         content: &mut C,
         style: &CanvasStyle,
-    ) -> CanvasResponse {
+    ) -> CanvasResponse<I> {
         let panel_rect = ui.available_rect_before_wrap();
         ui.painter().rect_filled(panel_rect, 0.0, style.background);
         // Last frame's drops have reached the graph by now.
@@ -210,7 +273,7 @@ impl Canvas {
             style,
             &mut events,
         );
-        self.advance_slide(canvas_ui.ctx(), graph, &mut events);
+        self.advance_slide(canvas_ui.ctx());
 
         grid::draw_grid(
             canvas_ui.painter(),
@@ -265,17 +328,16 @@ impl Canvas {
             wires: layout.wires.len(),
         };
         self.layout = layout;
-        self.resolve_waiting_room(graph, style);
         CanvasResponse { events, stats }
     }
 
-    fn sync_draw_order<N>(&mut self, graph: &Graph<N>) {
+    fn sync_draw_order<N>(&mut self, graph: &Graph<N, I>) {
         if self.synced_topology == Some(graph.topology_revision()) {
             return;
         }
         self.synced_topology = Some(graph.topology_revision());
         self.draw_order.retain(|id| graph.contains(*id));
-        let present: BTreeSet<NodeId> = self.draw_order.iter().copied().collect();
+        let present: BTreeSet<I> = self.draw_order.iter().copied().collect();
         for (id, _) in graph.nodes() {
             if !present.contains(&id) {
                 self.draw_order.push(id);

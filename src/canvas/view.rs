@@ -2,6 +2,7 @@
 //! and the edge of the panel pulling the view along with a drag.
 
 use super::{Canvas, CanvasStyle};
+use crate::NodeIdentifier;
 use egui::{PointerButton, Pos2, Rangef, Rect, Response, Ui, Vec2, emath::TSTransform};
 
 /// Where the user is looking. Stored as a graph-space centre and a zoom,
@@ -48,7 +49,7 @@ impl ViewState {
     }
 }
 
-impl Canvas {
+impl<I: NodeIdentifier> Canvas<I> {
     /// Pan and zoom from the background's input. Middle or secondary drag
     /// pans and leaves the primary button free for selection; a primary drag
     /// near the panel's edge pans too, so a node can be carried further than

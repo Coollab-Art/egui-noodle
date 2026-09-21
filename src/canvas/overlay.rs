@@ -11,18 +11,22 @@ use super::{
     node_ui::{self, highlight},
     round_corners, route_wire, screen_stroke,
 };
-use crate::{AnyPin, NodeId};
+use crate::{AnyPin, NodeIdentifier};
 use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2};
 
-pub(super) struct OverlayInput<'a> {
-    pub layout: &'a GraphLayout,
-    pub gesture: &'a Gesture,
+pub(super) struct OverlayInput<'a, I> {
+    pub layout: &'a GraphLayout<I>,
+    pub gesture: &'a Gesture<I>,
     /// The `+` on the hovered wire, and whether the pointer is on it.
     pub insert_button: Option<(Rect, bool)>,
     pub zoom: f32,
 }
 
-pub(super) fn draw_overlay(painter: &Painter, input: OverlayInput<'_>, style: &CanvasStyle) {
+pub(super) fn draw_overlay<I: NodeIdentifier>(
+    painter: &Painter,
+    input: OverlayInput<'_, I>,
+    style: &CanvasStyle,
+) {
     let OverlayInput {
         layout,
         gesture,
@@ -103,11 +107,11 @@ pub(super) fn draw_overlay(painter: &Painter, input: OverlayInput<'_>, style: &C
 }
 
 /// The outline colour for a node that is selected or about to be cut.
-pub(super) fn node_outline(
-    id: NodeId,
+pub(super) fn node_outline<I: NodeIdentifier>(
+    id: I,
     node: &NodeLayout,
-    selection: &Selection,
-    gesture: &Gesture,
+    selection: &Selection<I>,
+    gesture: &Gesture<I>,
     style: &CanvasStyle,
 ) -> Option<Color32> {
     if gesture.cut_nodes().contains(&id) {
@@ -134,11 +138,11 @@ pub(super) enum WireHighlight {
 /// cut or one a dragged node cannot go into, a lighter shade of its own over
 /// the hovered wire or the one a dragged node would be spliced into, and the
 /// selection colour as an outline behind a selected wire.
-pub(super) fn wire_highlight(
-    drawn: &super::WireLayout,
-    selection: &Selection,
-    gesture: &Gesture,
-    hovered: Hovered,
+pub(super) fn wire_highlight<I: NodeIdentifier>(
+    drawn: &super::WireLayout<I>,
+    selection: &Selection<I>,
+    gesture: &Gesture<I>,
+    hovered: Hovered<I>,
     style: &CanvasStyle,
 ) -> Option<WireHighlight> {
     let wire = drawn.wire;
@@ -174,7 +178,7 @@ pub(super) fn wire_highlight(
         .then_some(WireHighlight::Outline(color))
 }
 
-fn compatible(origin: AnyPin, target: AnyPin) -> bool {
+fn compatible<I: NodeIdentifier>(origin: AnyPin<I>, target: AnyPin<I>) -> bool {
     match (origin, target) {
         (AnyPin::Out(from), AnyPin::In(to)) | (AnyPin::In(to), AnyPin::Out(from)) => {
             can_connect(from, to)
@@ -185,10 +189,10 @@ fn compatible(origin: AnyPin, target: AnyPin) -> bool {
 
 /// The wire being dragged from `origin`, ready to route: between two drawn
 /// pins when it is over `target`, to a loose end at the pointer otherwise.
-fn drag_ends(
-    layout: &GraphLayout,
-    origin: AnyPin,
-    target: Option<AnyPin>,
+fn drag_ends<I: NodeIdentifier>(
+    layout: &GraphLayout<I>,
+    origin: AnyPin<I>,
+    target: Option<AnyPin<I>>,
     pointer: Pos2,
 ) -> Option<WireEndpoints> {
     match (origin, target) {
@@ -248,7 +252,12 @@ fn draw_insert_button(
 
 /// The pin a dragged wire would land on. Over every node, unlike a node's own
 /// pins: it is feedback for the drag, not part of the node.
-fn draw_pin_highlight(painter: &Painter, layout: &GraphLayout, pin: AnyPin, style: &CanvasStyle) {
+fn draw_pin_highlight<I: NodeIdentifier>(
+    painter: &Painter,
+    layout: &GraphLayout<I>,
+    pin: AnyPin<I>,
+    style: &CanvasStyle,
+) {
     if let (Some(rect), Some(color)) = (layout.pin_rect(pin), layout.pin_color(pin)) {
         node_ui::draw_pin(
             painter,

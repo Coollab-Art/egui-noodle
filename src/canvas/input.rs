@@ -7,10 +7,10 @@ use super::{
     Canvas, CanvasEvent, CanvasStyle, Selection, WireLayout, polyline_crosses_segment,
     segment_intersects_rect, snap,
 };
-use crate::{AnyPin, Graph, NodeId, Wire};
+use crate::{AnyPin, Graph, MovePhase, NodeIdentifier, Wire};
 use egui::{Key, PointerButton, Pos2, Rect, Response, Sense, Ui, emath::TSTransform};
 
-impl Canvas {
+impl<I: NodeIdentifier> Canvas<I> {
     /// Registers this frame's hit areas from where everything was drawn last
     /// frame - in phase with egui, which hit-tests against last frame's rects
     /// too. They go on the nodes layer, scaled like it, so a widget inside a
@@ -22,11 +22,11 @@ impl Canvas {
     pub(super) fn register_interactors<N>(
         &self,
         nodes_ui: &mut Ui,
-        graph: &Graph<N>,
+        graph: &Graph<N, I>,
         modifiers: egui::Modifiers,
         content_scale: f32,
         style: &CanvasStyle,
-    ) -> (Interactors<NodeId>, Interactors<AnyPin>) {
+    ) -> (Interactors<I>, Interactors<AnyPin<I>>) {
         let frame_sense = if modifiers.command {
             Sense::click()
         } else {
@@ -74,16 +74,22 @@ impl Canvas {
     /// the background behind it.
     pub(super) fn handle_input<N>(
         &mut self,
-        graph: &Graph<N>,
-        interaction: Interaction<'_>,
+        graph: &Graph<N, I>,
+        interaction: Interaction<'_, I>,
         style: &CanvasStyle,
-        events: &mut Vec<CanvasEvent>,
+        events: &mut Vec<CanvasEvent<I>>,
     ) {
+        let selection_before = self.selection.clone();
         self.selection.retain_present(graph);
         self.press_on_widget(graph, interaction, events);
         self.advance_gesture(graph, interaction, style, events);
         self.press_on_background(graph, interaction, events);
         self.delete_key(graph, interaction.background, events);
+        if self.selection != selection_before {
+            events.push(CanvasEvent::SelectionChanged {
+                selection: self.selection.clone(),
+            });
+        }
     }
 
     /// A press on a node's frame or on a pin: what it selects, what it raises,
@@ -91,9 +97,9 @@ impl Canvas {
     /// click on a widget, even though it begins nothing.
     fn press_on_widget<N>(
         &mut self,
-        graph: &Graph<N>,
-        interaction: Interaction<'_>,
-        events: &mut Vec<CanvasEvent>,
+        graph: &Graph<N, I>,
+        interaction: Interaction<'_, I>,
+        events: &mut Vec<CanvasEvent<I>>,
     ) {
         let Interaction {
             frames,
@@ -150,10 +156,10 @@ impl Canvas {
     /// when it ends.
     fn advance_gesture<N>(
         &mut self,
-        graph: &Graph<N>,
-        interaction: Interaction<'_>,
+        graph: &Graph<N, I>,
+        interaction: Interaction<'_, I>,
         style: &CanvasStyle,
-        events: &mut Vec<CanvasEvent>,
+        events: &mut Vec<CanvasEvent<I>>,
     ) {
         let Interaction {
             frames,
@@ -170,7 +176,6 @@ impl Canvas {
             Gesture::Idle => false,
             Gesture::DraggingNodes {
                 handle,
-                start,
                 grab,
                 targets,
                 guide_x,
@@ -194,9 +199,12 @@ impl Canvas {
                     *insert_target = self.insert_target_under(pointer, targets, modifiers, style);
                 }
                 let ended = drag_ended(frames, handle);
-                if ended {
-                    self.release_nodes(start, targets, *insert_target, events);
-                }
+                let phase = if ended {
+                    MovePhase::Finished
+                } else {
+                    MovePhase::Ongoing
+                };
+                self.report_moves(graph, targets, phase, *insert_target, events);
                 ended
             }
             Gesture::BoxSelecting {
@@ -257,9 +265,9 @@ impl Canvas {
     /// selection, splices into a wire, or asks for the application's menu.
     fn press_on_background<N>(
         &mut self,
-        graph: &Graph<N>,
-        interaction: Interaction<'_>,
-        events: &mut Vec<CanvasEvent>,
+        graph: &Graph<N, I>,
+        interaction: Interaction<'_, I>,
+        events: &mut Vec<CanvasEvent<I>>,
     ) {
         let Interaction {
             background,
@@ -318,9 +326,9 @@ impl Canvas {
     /// canvas and nothing else wants the keyboard.
     fn delete_key<N>(
         &self,
-        graph: &Graph<N>,
+        graph: &Graph<N, I>,
         background: &Response,
-        events: &mut Vec<CanvasEvent>,
+        events: &mut Vec<CanvasEvent<I>>,
     ) {
         let delete_pressed = background
             .ctx
@@ -344,8 +352,8 @@ impl Canvas {
     fn extend_cut(
         &self,
         stroke: &mut Vec<Pos2>,
-        wires: &mut Vec<Wire>,
-        nodes: &mut Vec<NodeId>,
+        wires: &mut Vec<Wire<I>>,
+        nodes: &mut Vec<I>,
         pointer: Pos2,
     ) {
         if stroke.last() == Some(&pointer) {
@@ -377,7 +385,7 @@ fn drag_ended<K: PartialEq>(responses: &[(K, Response)], key: &K) -> bool {
 }
 
 /// Every wire whose drawn polyline the stroke crosses.
-fn wires_crossed_by(stroke: &[Pos2], wires: &[WireLayout]) -> Vec<Wire> {
+fn wires_crossed_by<I: NodeIdentifier>(stroke: &[Pos2], wires: &[WireLayout<I>]) -> Vec<Wire<I>> {
     wires
         .iter()
         .filter(|wire| {
@@ -392,10 +400,10 @@ fn wires_crossed_by(stroke: &[Pos2], wires: &[WireLayout]) -> Vec<Wire> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InPin, InputId, OutPin, OutputId};
+    use crate::{InPin, InputId, OutPin, OutputId, SequentialNodeId as NodeId};
     use egui::{Color32, pos2};
 
-    fn wire_layout(index: u64, polyline: Vec<Pos2>) -> WireLayout {
+    fn wire_layout(index: u64, polyline: Vec<Pos2>) -> WireLayout<NodeId> {
         WireLayout {
             wire: Wire {
                 from: OutPin {

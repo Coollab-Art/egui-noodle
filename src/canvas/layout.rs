@@ -1,5 +1,5 @@
 use super::{Selection, distance_to_polyline, polyline_intersects_rect};
-use crate::{AnyPin, ConnectionPolicy, InPin, InputId, NodeId, OutPin, OutputId, Wire};
+use crate::{AnyPin, ConnectionPolicy, InPin, InputId, NodeIdentifier, OutPin, OutputId, Wire};
 use egui::{Color32, Pos2, Rect, Vec2, emath::TSTransform};
 use std::collections::BTreeMap;
 
@@ -8,14 +8,14 @@ use std::collections::BTreeMap;
 /// canvas's own gestures read - one frame behind, exactly like egui's own
 /// hit-testing.
 #[derive(Clone, Debug)]
-pub struct GraphLayout {
+pub struct GraphLayout<I> {
     pub to_global: TSTransform,
     /// Graph space: what the panel showed.
     pub viewport: Rect,
-    pub nodes: BTreeMap<NodeId, NodeLayout>,
+    pub nodes: BTreeMap<I, NodeLayout>,
     /// Back to front.
-    pub draw_order: Vec<NodeId>,
-    pub wires: Vec<WireLayout>,
+    pub draw_order: Vec<I>,
+    pub wires: Vec<WireLayout<I>>,
 }
 
 #[derive(Clone, Debug)]
@@ -51,8 +51,8 @@ pub struct OutputPinLayout {
 }
 
 #[derive(Clone, Debug)]
-pub struct WireLayout {
-    pub wire: Wire,
+pub struct WireLayout<I> {
+    pub wire: Wire<I>,
     /// Its source output pin's, so a wire reads as carrying what that output
     /// produces.
     /// The output pin's centre, where the wire starts.
@@ -65,7 +65,7 @@ pub struct WireLayout {
     pub color: Color32,
 }
 
-impl Default for GraphLayout {
+impl<I> Default for GraphLayout<I> {
     fn default() -> Self {
         Self {
             to_global: TSTransform::IDENTITY,
@@ -79,7 +79,10 @@ impl Default for GraphLayout {
 
 impl NodeLayout {
     /// Every pin with the rect it was drawn in.
-    pub fn pins(&self, node: NodeId) -> impl Iterator<Item = (AnyPin, Rect)> + '_ {
+    pub fn pins<I: NodeIdentifier>(
+        &self,
+        node: I,
+    ) -> impl Iterator<Item = (AnyPin<I>, Rect)> + use<'_, I> {
         let inputs = self.inputs.iter().map(move |pin| {
             (
                 AnyPin::In(InPin {
@@ -102,7 +105,7 @@ impl NodeLayout {
     }
 
     /// What colour a pin of this node was drawn in.
-    pub fn pin_color(&self, pin: AnyPin) -> Option<Color32> {
+    pub fn pin_color<I>(&self, pin: AnyPin<I>) -> Option<Color32> {
         match pin {
             AnyPin::In(pin) => self
                 .inputs
@@ -144,7 +147,7 @@ impl NodeLayout {
     }
 }
 
-impl WireLayout {
+impl<I> WireLayout<I> {
     /// Where the wire's `+` sits: the middle of its longest run, which on a
     /// forward wire is the horizontal bus into the target.
     pub fn insert_point(&self) -> Option<Pos2> {
@@ -160,9 +163,9 @@ impl WireLayout {
     }
 }
 
-impl GraphLayout {
+impl<I: NodeIdentifier> GraphLayout<I> {
     /// The topmost node under a graph-space point.
-    pub fn node_at(&self, point: Pos2) -> Option<NodeId> {
+    pub fn node_at(&self, point: Pos2) -> Option<I> {
         self.draw_order.iter().rev().copied().find(|id| {
             self.nodes
                 .get(id)
@@ -172,7 +175,7 @@ impl GraphLayout {
 
     /// The pin whose grab area (its rect grown by `slack`) contains the point.
     /// Nearest wins when grab areas overlap.
-    pub fn pin_at(&self, point: Pos2, slack: f32) -> Option<AnyPin> {
+    pub fn pin_at(&self, point: Pos2, slack: f32) -> Option<AnyPin<I>> {
         self.nodes
             .iter()
             .flat_map(|(id, node)| node.pins(*id))
@@ -186,7 +189,7 @@ impl GraphLayout {
     }
 
     /// The wire passing within `slack` of the point. Nearest wins.
-    pub fn wire_at(&self, point: Pos2, slack: f32) -> Option<Wire> {
+    pub fn wire_at(&self, point: Pos2, slack: f32) -> Option<Wire<I>> {
         self.wires
             .iter()
             .map(|wire| (distance_to_polyline(&wire.polyline, point), wire.wire))
@@ -196,7 +199,7 @@ impl GraphLayout {
     }
 
     /// The wire whose `+` button (of the given size) contains the point.
-    pub fn wire_with_insert_button_at(&self, point: Pos2, button_size: f32) -> Option<Wire> {
+    pub fn wire_with_insert_button_at(&self, point: Pos2, button_size: f32) -> Option<Wire<I>> {
         self.wires
             .iter()
             .find(|wire| {
@@ -206,7 +209,7 @@ impl GraphLayout {
             .map(|wire| wire.wire)
     }
 
-    pub fn nodes_intersecting(&self, rect: Rect) -> impl Iterator<Item = NodeId> + '_ {
+    pub fn nodes_intersecting(&self, rect: Rect) -> impl Iterator<Item = I> + '_ {
         self.nodes
             .iter()
             .filter(move |(_, node)| node.rect.intersects(rect))
@@ -215,7 +218,7 @@ impl GraphLayout {
 
     /// Every node and wire the rect touches - what a box selection over it
     /// selects.
-    pub fn contents_of(&self, rect: Rect) -> Selection {
+    pub fn contents_of(&self, rect: Rect) -> Selection<I> {
         Selection {
             nodes: self.nodes_intersecting(rect).collect(),
             wires: self
@@ -227,11 +230,11 @@ impl GraphLayout {
         }
     }
 
-    pub fn wire(&self, wire: Wire) -> Option<&WireLayout> {
+    pub fn wire(&self, wire: Wire<I>) -> Option<&WireLayout<I>> {
         self.wires.iter().find(|drawn| drawn.wire == wire)
     }
 
-    pub fn input(&self, pin: InPin) -> Option<&InputPinLayout> {
+    pub fn input(&self, pin: InPin<I>) -> Option<&InputPinLayout> {
         self.nodes
             .get(&pin.node)?
             .inputs
@@ -239,7 +242,7 @@ impl GraphLayout {
             .find(|layout| layout.id == pin.input)
     }
 
-    pub fn output(&self, pin: OutPin) -> Option<&OutputPinLayout> {
+    pub fn output(&self, pin: OutPin<I>) -> Option<&OutputPinLayout> {
         self.nodes
             .get(&pin.node)?
             .outputs
@@ -247,14 +250,14 @@ impl GraphLayout {
             .find(|layout| layout.id == pin.output)
     }
 
-    pub fn pin_rect(&self, pin: AnyPin) -> Option<Rect> {
+    pub fn pin_rect(&self, pin: AnyPin<I>) -> Option<Rect> {
         match pin {
             AnyPin::In(pin) => self.input(pin).map(|layout| layout.rect),
             AnyPin::Out(pin) => self.output(pin).map(|layout| layout.rect),
         }
     }
 
-    pub fn pin_color(&self, pin: AnyPin) -> Option<Color32> {
+    pub fn pin_color(&self, pin: AnyPin<I>) -> Option<Color32> {
         self.nodes.get(&pin.node())?.pin_color(pin)
     }
 }
@@ -262,6 +265,7 @@ impl GraphLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SequentialNodeId as NodeId;
     use egui::{pos2, vec2};
 
     fn node(rect: Rect) -> NodeLayout {
@@ -275,7 +279,7 @@ mod tests {
         }
     }
 
-    fn layout_with(nodes: Vec<(NodeId, NodeLayout)>) -> GraphLayout {
+    fn layout_with(nodes: Vec<(NodeId, NodeLayout)>) -> GraphLayout<NodeId> {
         let draw_order = nodes.iter().map(|(id, _)| *id).collect();
         GraphLayout {
             nodes: nodes.into_iter().collect(),
@@ -304,7 +308,7 @@ mod tests {
 
     #[test]
     fn a_box_selects_the_wires_it_touches_along_with_the_nodes() {
-        let wire_layout = |index: u64, polyline: Vec<Pos2>| WireLayout {
+        let wire_layout = |index: u64, polyline: Vec<Pos2>| WireLayout::<NodeId> {
             wire: Wire {
                 from: OutPin {
                     node: NodeId(index),

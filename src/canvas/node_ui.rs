@@ -1,5 +1,5 @@
 use super::{CanvasStyle, InputPinLayout, NodeContent, NodeLayout, OutputPinLayout, PinShape};
-use crate::{AnyPin, NodeId};
+use crate::{AnyPin, NodeIdentifier};
 use egui::{
     Align, CornerRadius, Frame, Id, Layout, Margin, Rect, Shape, Stroke, StrokeKind, Style,
     TextWrapMode, Ui, UiBuilder, Vec2, emath::TSTransform, epaint::RectShape, pos2,
@@ -21,8 +21,8 @@ pub(super) fn draw_node<C: NodeContent>(
     style: &CanvasStyle,
     scale: f32,
     content: &mut C,
-    payload: &mut C::Node,
-    placement: NodePlacement,
+    payload: &C::Node,
+    placement: NodePlacement<C::Id>,
 ) -> NodeLayout {
     let NodePlacement {
         id,
@@ -147,12 +147,12 @@ pub(super) fn draw_node<C: NodeContent>(
 }
 
 /// What marks one node out from the rest.
-pub(super) struct NodeMarks {
+pub(super) struct NodeMarks<I> {
     /// The outline around it: selected, or about to be cut.
     pub outline: Option<egui::Color32>,
     /// The pin the pointer is on, wherever it is - only this node's own is
     /// drawn.
-    pub hovered_pin: Option<AnyPin>,
+    pub hovered_pin: Option<AnyPin<I>>,
 }
 
 /// Paints one node's outline and its pins, in the same pass as the node so
@@ -162,13 +162,13 @@ pub(super) struct NodeMarks {
 ///
 /// `layout` is in graph units; `scale` puts it in the units the nodes layer is
 /// drawn in.
-pub(super) fn draw_marks(
+pub(super) fn draw_marks<I: NodeIdentifier>(
     painter: &egui::Painter,
     style: &CanvasStyle,
     scale: f32,
-    id: NodeId,
+    id: I,
     layout: &NodeLayout,
-    marks: &NodeMarks,
+    marks: &NodeMarks<I>,
 ) {
     let to_scaled = TSTransform::from_scaling(scale);
     if let Some(color) = marks.outline {
@@ -222,8 +222,8 @@ pub(super) fn highlight(color: egui::Color32) -> egui::Color32 {
 }
 
 /// Where one node goes this frame.
-pub(super) struct NodePlacement {
-    pub id: NodeId,
+pub(super) struct NodePlacement<I> {
+    pub id: I,
     /// Graph space, the node's top-left corner.
     pub pos: egui::Pos2,
     /// What the node measured last time. The frame it first appears it is

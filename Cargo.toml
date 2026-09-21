@@ -13,6 +13,12 @@ categories = ["gui"]
 # build when cloned on its own. See AGENTS.md.
 [dependencies]
 egui = "0.36"
+serde = { version = "1.0", optional = true, features = ["derive"] }
+
+[features]
+# Serialize the ids, pins, wires and events, for an application that saves
+# or transmits them. Pulls egui's own `serde` feature for `Pos2`.
+serde = ["dep:serde", "egui/serde"]
 
 [dev-dependencies]
 eframe = "0.36"

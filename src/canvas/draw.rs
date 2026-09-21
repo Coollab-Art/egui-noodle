@@ -6,7 +6,7 @@ use super::{
     Canvas, CanvasStyle, NodeContent, NodeLayout, WireEndpoints, WireLayout, node_ui, overlay,
     round_corners, route_wire,
 };
-use crate::{Graph, NodeId};
+use crate::{Graph, NodeIdentifier};
 use egui::{Rect, Shape, Stroke, Ui};
 use std::collections::BTreeMap;
 
@@ -14,22 +14,22 @@ use std::collections::BTreeMap;
 /// Generous, so a node half a screen away still animates in smoothly.
 const CULL_MARGIN: f32 = 200.0;
 
-impl Canvas {
+impl<I: NodeIdentifier> Canvas<I> {
     /// Builds every node's content - or, for a node off-screen, places its
     /// last geometry at its position without building anything.
-    pub(super) fn draw_nodes<C: NodeContent>(
+    pub(super) fn draw_nodes<C: NodeContent<Id = I>>(
         &self,
         nodes_ui: &mut Ui,
-        graph: &mut Graph<C::Node>,
+        graph: &Graph<C::Node, I>,
         content: &mut C,
         content_scale: f32,
         style: &CanvasStyle,
         viewport: Rect,
-    ) -> BTreeMap<NodeId, NodeLayout> {
+    ) -> BTreeMap<I, NodeLayout> {
         let cull_bounds = viewport.expand(CULL_MARGIN);
         let mut nodes = BTreeMap::new();
         for id in &self.draw_order {
-            let Some(node) = graph.node_mut(*id) else {
+            let Some(node) = graph.node(*id) else {
                 continue;
             };
             let pos = self.drawn_pos(*id, node.pos);
@@ -45,7 +45,7 @@ impl Canvas {
                 style,
                 content_scale,
                 content,
-                &mut node.payload,
+                &node.payload,
                 node_ui::NodePlacement {
                     id: *id,
                     pos,
@@ -88,13 +88,13 @@ impl Canvas {
     /// same - which is nearly every wire, nearly every frame.
     pub(super) fn route_wires<N>(
         &mut self,
-        graph: &Graph<N>,
-        nodes: &BTreeMap<NodeId, NodeLayout>,
+        graph: &Graph<N, I>,
+        nodes: &BTreeMap<I, NodeLayout>,
         zoom: f32,
         style: &CanvasStyle,
-    ) -> Vec<WireLayout> {
+    ) -> Vec<WireLayout<I>> {
         let same_zoom = self.layout.to_global.scaling == zoom;
-        let mut previous: BTreeMap<crate::Wire, WireLayout> =
+        let mut previous: BTreeMap<crate::Wire<I>, WireLayout<I>> =
             std::mem::take(&mut self.layout.wires)
                 .into_iter()
                 .map(|wire| (wire.wire, wire))
@@ -113,7 +113,7 @@ impl Canvas {
                 let to_pin = to_node.inputs.iter().find(|pin| pin.id == wire.to.input)?;
                 let (from, to) = (from_pin.rect.center(), to_pin.rect.center());
 
-                let node_unmoved = |id: NodeId| {
+                let node_unmoved = |id: I| {
                     self.layout.nodes.get(&id).map(|node| node.rect)
                         == nodes.get(&id).map(|node| node.rect)
                 };
@@ -158,7 +158,7 @@ impl Canvas {
     /// hovered, about to be cut, about to receive a dropped node) outlined
     /// behind it or restroked over it. The outline stands out either side by
     /// as much as a selected node's halo, so the two read as the same mark.
-    pub(super) fn wire_shapes(&self, wires: &[WireLayout], style: &CanvasStyle) -> Shape {
+    pub(super) fn wire_shapes(&self, wires: &[WireLayout<I>], style: &CanvasStyle) -> Shape {
         let highlights: Vec<Option<overlay::WireHighlight>> = wires
             .iter()
             .map(|wire| {
@@ -204,13 +204,14 @@ impl Canvas {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
-    use crate::{ConnectionPolicy, InputId, InputSpec, OutputId, OutputSpec};
+    use crate::{ConnectionPolicy, InputId, InputSpec, OutputId, OutputSpec, SequentialNodeId};
     use egui::{Color32, Vec2, pos2};
 
     struct TestContent;
 
     impl NodeContent for TestContent {
         type Node = ();
+        type Id = SequentialNodeId;
 
         fn inputs(&mut self, _node: &()) -> Vec<InputSpec> {
             ["center_position_xy", "random_seed", "zoom_amount"]
@@ -246,11 +247,13 @@ mod layout_tests {
         let mut canvas = Canvas::new();
         canvas.view.zoom = zoom;
         let mut graph = Graph::new();
-        graph.add_node((), pos2(0.0, 0.0));
+        graph
+            .add_node(SequentialNodeId(0), (), pos2(0.0, 0.0))
+            .unwrap();
         (0..frames)
             .map(|_| {
                 ctx.run_ui(Default::default(), |ui| {
-                    canvas.show(ui, &mut graph, &mut TestContent, &style);
+                    canvas.show(ui, &graph, &mut TestContent, &style);
                 })
                 .drop_without_applying_deltas();
                 canvas

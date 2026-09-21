@@ -1,22 +1,25 @@
-use super::{InPin, InputId, NodeId, OutPin, OutputId, Wire};
+use super::{InPin, InputId, NodeIdentifier, OutPin, OutputId, Wire};
 use egui::Pos2;
 use std::collections::BTreeMap;
 
-/// The node graph. `N` is whatever the application stores per node; the graph
-/// never looks inside it.
+/// The node graph. `N` is whatever the application stores per node and `I` is
+/// how it identifies one; the graph never looks inside either, and never
+/// mints an id - see [`NodeIdentifier`](super::NodeIdentifier).
 ///
-/// Every mutation returns what its inverse needs, and none of them panics on a
-/// stale id, so an undo/redo layer can be built on top without the graph
-/// knowing about it. See `1-Application Owns the Model.md` and
-/// `2-Node and Wire Identity.md`.
-pub struct Graph<N> {
-    /// Keyed by a monotonic id, so iteration is creation order and stable
-    /// across runs - the compiled output must not depend on hash order.
-    nodes: BTreeMap<NodeId, Node<N>>,
-    next_id: u64,
+/// The mutations are the primitives an undo layer wants: each does one thing,
+/// each returns what its inverse needs, and none of them panics on a stale
+/// id. Policy - what a wire dropped on an occupied input should do - lives
+/// above them, in `Graph::apply` and `insert_into_wire`, so an application
+/// with its own rules can build on the primitives directly. See
+/// `1-Application Owns the Model.md`, `2-Node and Wire Identity.md` and
+/// `6-Application Owns Identity.md`.
+pub struct Graph<N, I: NodeIdentifier> {
+    /// Keyed by id, so iteration order is stable across runs - the compiled
+    /// output must not depend on hash order.
+    nodes: BTreeMap<I, Node<N>>,
     /// Insertion order, for the same reason. Every lookup scans it; at the
     /// hundreds of wires a hand-authored graph holds that is microseconds.
-    wires: Vec<Wire>,
+    wires: Vec<Wire<I>>,
     topology_revision: u64,
     layout_revision: u64,
 }
@@ -28,8 +31,9 @@ pub struct Node<N> {
     pub payload: N,
 }
 
-/// How many wires one input accepts. Declared per input by the application;
-/// the graph enforces it on `connect`.
+/// How many wires one input accepts. Declared per input by the application,
+/// carried on `ConnectRequested`, and enforced by `Graph::apply` and
+/// `insert_into_wire` - never by `connect` itself, which just adds a wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionPolicy {
     /// A new wire displaces whatever was plugged in before.
@@ -39,19 +43,16 @@ pub enum ConnectionPolicy {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Connected {
-    New {
-        /// The wires a `Single` input dropped to make room.
-        displaced: Vec<Wire>,
-    },
+    New,
     /// The wire was already there. Nothing changed.
     AlreadyExisted,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Inserted {
+pub enum Inserted<I> {
     Done {
         /// The wires the new node's input dropped under its policy.
-        displaced: Vec<Wire>,
+        displaced: Vec<Wire<I>>,
     },
     /// The wire to splice into was no longer there. Nothing changed.
     WireGone,
@@ -59,25 +60,24 @@ pub enum Inserted {
 
 /// A wire's end names a node the graph does not hold - a stale id, typically.
 #[derive(Debug, PartialEq, Eq)]
-pub struct UnknownNode(pub NodeId);
+pub struct UnknownNode<I>(pub I);
 
 /// Everything needed to put a removed node back exactly as it was, with
-/// `add_node_with_id` and `connect`.
-pub struct RemovedNode<N> {
+/// `add_node` and `connect`.
+pub struct RemovedNode<N, I> {
     pub node: Node<N>,
     /// Every wire that touched the node, incoming and outgoing.
-    pub wires: Vec<Wire>,
+    pub wires: Vec<Wire<I>>,
 }
 
 /// The node already exists. Nothing changed.
 #[derive(Debug, PartialEq, Eq)]
-pub struct IdInUse(pub NodeId);
+pub struct IdInUse<I>(pub I);
 
-impl<N> Default for Graph<N> {
+impl<N, I: NodeIdentifier> Default for Graph<N, I> {
     fn default() -> Self {
         Self {
             nodes: BTreeMap::new(),
-            next_id: 0,
             wires: Vec::new(),
             topology_revision: 0,
             layout_revision: 0,
@@ -85,33 +85,26 @@ impl<N> Default for Graph<N> {
     }
 }
 
-impl<N> Graph<N> {
+impl<N, I: NodeIdentifier> Graph<N, I> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn add_node(&mut self, payload: N, pos: Pos2) -> NodeId {
-        let id = NodeId(self.next_id);
-        self.next_id += 1;
-        self.nodes.insert(id, Node { pos, payload });
-        self.topology_revision += 1;
-        id
-    }
-
-    /// Restores a node under an id it held before - on undo, or on loading a
-    /// document. Ids minted afterwards stay above it.
-    pub fn add_node_with_id(&mut self, id: NodeId, payload: N, pos: Pos2) -> Result<(), IdInUse> {
+    /// Adds a node under an id the application minted - a fresh one, or the
+    /// one a node held before it was removed, on undo or on loading a
+    /// document.
+    pub fn add_node(&mut self, id: I, payload: N, pos: Pos2) -> Result<(), IdInUse<I>> {
         if self.nodes.contains_key(&id) {
             return Err(IdInUse(id));
         }
         self.nodes.insert(id, Node { pos, payload });
-        self.next_id = self.next_id.max(id.0.saturating_add(1));
         self.topology_revision += 1;
         Ok(())
     }
 
-    /// `None` when the node is not in the graph.
-    pub fn remove_node(&mut self, id: NodeId) -> Option<RemovedNode<N>> {
+    /// Removes the node and every wire touching it. `None` when the node is
+    /// not in the graph.
+    pub fn remove_node(&mut self, id: I) -> Option<RemovedNode<N, I>> {
         let node = self.nodes.remove(&id)?;
         let wires = self
             .wires
@@ -122,7 +115,7 @@ impl<N> Graph<N> {
     }
 
     /// Returns the previous position, or `None` when the node is not in the graph.
-    pub fn set_pos(&mut self, id: NodeId, pos: Pos2) -> Option<Pos2> {
+    pub fn set_pos(&mut self, id: I, pos: Pos2) -> Option<Pos2> {
         let node = self.nodes.get_mut(&id)?;
         let previous = std::mem::replace(&mut node.pos, pos);
         if previous != pos {
@@ -131,35 +124,25 @@ impl<N> Graph<N> {
         Some(previous)
     }
 
-    pub fn connect(
-        &mut self,
-        from: OutPin,
-        to: InPin,
-        policy: ConnectionPolicy,
-    ) -> Result<Connected, UnknownNode> {
-        for node in [from.node, to.node] {
+    /// Adds a wire. Just that: an input may hold any number of wires as far
+    /// as the graph is concerned, so a `Single` input's previous wire is the
+    /// caller's to remove first - see `Graph::apply`.
+    pub fn connect(&mut self, wire: Wire<I>) -> Result<Connected, UnknownNode<I>> {
+        for node in [wire.from.node, wire.to.node] {
             if !self.nodes.contains_key(&node) {
                 return Err(UnknownNode(node));
             }
         }
-        let wire = Wire { from, to };
         if self.wires.contains(&wire) {
             return Ok(Connected::AlreadyExisted);
         }
-        let displaced = match policy {
-            ConnectionPolicy::Single => self
-                .wires
-                .extract_if(.., |existing| existing.to == to)
-                .collect(),
-            ConnectionPolicy::Multiple => Vec::new(),
-        };
         self.wires.push(wire);
         self.topology_revision += 1;
-        Ok(Connected::New { displaced })
+        Ok(Connected::New)
     }
 
     /// Whether the wire was there to remove.
-    pub fn disconnect(&mut self, wire: Wire) -> bool {
+    pub fn disconnect(&mut self, wire: Wire<I>) -> bool {
         let Some(index) = self.wires.iter().position(|existing| *existing == wire) else {
             return false;
         };
@@ -169,55 +152,80 @@ impl<N> Graph<N> {
     }
 
     /// Splices `node` into `wire`: the wire's source now feeds `input`, and
-    /// `output` now feeds the wire's old target.
+    /// `output` now feeds the wire's old target. A convenience over the
+    /// primitives, for an application without undo; one with undo emits the
+    /// disconnect and the two connects itself.
     pub fn insert_into_wire(
         &mut self,
-        wire: Wire,
-        node: NodeId,
+        wire: Wire<I>,
+        node: I,
         input: InputId,
         input_policy: ConnectionPolicy,
         output: OutputId,
-    ) -> Result<Inserted, UnknownNode> {
+    ) -> Result<Inserted<I>, UnknownNode<I>> {
         if !self.nodes.contains_key(&node) {
             return Err(UnknownNode(node));
         }
         if !self.disconnect(wire) {
             return Ok(Inserted::WireGone);
         }
-        let displaced = match self.connect(wire.from, InPin { node, input }, input_policy)? {
-            Connected::New { displaced } => displaced,
-            Connected::AlreadyExisted => Vec::new(),
-        };
+        let into = InPin { node, input };
+        let displaced = self.displace(into, input_policy);
+        self.connect(Wire {
+            from: wire.from,
+            to: into,
+        })?;
         // The old wire into the target is gone, so nothing is left to displace
         // there whatever its policy.
-        self.connect(OutPin { node, output }, wire.to, ConnectionPolicy::Multiple)?;
+        self.connect(Wire {
+            from: OutPin { node, output },
+            to: wire.to,
+        })?;
         Ok(Inserted::Done { displaced })
     }
 
-    pub fn node(&self, id: NodeId) -> Option<&Node<N>> {
+    /// What the policy says must go before a new wire lands on `input`:
+    /// under `Single`, every wire already there. Removes and returns them.
+    pub fn displace(&mut self, input: InPin<I>, policy: ConnectionPolicy) -> Vec<Wire<I>> {
+        match policy {
+            ConnectionPolicy::Single => {
+                let displaced: Vec<Wire<I>> = self
+                    .wires
+                    .extract_if(.., |existing| existing.to == input)
+                    .collect();
+                if !displaced.is_empty() {
+                    self.topology_revision += 1;
+                }
+                displaced
+            }
+            ConnectionPolicy::Multiple => Vec::new(),
+        }
+    }
+
+    pub fn node(&self, id: I) -> Option<&Node<N>> {
         self.nodes.get(&id)
     }
 
-    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node<N>> {
+    pub fn node_mut(&mut self, id: I) -> Option<&mut Node<N>> {
         self.nodes.get_mut(&id)
     }
 
-    pub fn contains(&self, id: NodeId) -> bool {
+    pub fn contains(&self, id: I) -> bool {
         self.nodes.contains_key(&id)
     }
 
-    /// In creation order.
-    pub fn nodes(&self) -> impl Iterator<Item = (NodeId, &Node<N>)> {
+    /// In id order.
+    pub fn nodes(&self) -> impl Iterator<Item = (I, &Node<N>)> {
         self.nodes.iter().map(|(id, node)| (*id, node))
     }
 
     /// In connection order.
-    pub fn wires(&self) -> &[Wire] {
+    pub fn wires(&self) -> &[Wire<I>] {
         &self.wires
     }
 
     /// The outputs wired into this input.
-    pub fn sources_of(&self, pin: InPin) -> impl Iterator<Item = OutPin> + '_ {
+    pub fn sources_of(&self, pin: InPin<I>) -> impl Iterator<Item = OutPin<I>> + '_ {
         self.wires
             .iter()
             .filter(move |wire| wire.to == pin)
@@ -225,7 +233,7 @@ impl<N> Graph<N> {
     }
 
     /// The inputs this output is wired into.
-    pub fn targets_of(&self, pin: OutPin) -> impl Iterator<Item = InPin> + '_ {
+    pub fn targets_of(&self, pin: OutPin<I>) -> impl Iterator<Item = InPin<I>> + '_ {
         self.wires
             .iter()
             .filter(move |wire| wire.from == pin)
@@ -248,117 +256,94 @@ impl<N> Graph<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SequentialNodeId;
     use egui::pos2;
     use std::collections::HashSet;
 
-    fn in_pin(node: NodeId, input: u64) -> InPin {
+    type Id = SequentialNodeId;
+
+    fn in_pin(node: Id, input: u64) -> InPin<Id> {
         InPin {
             node,
             input: InputId(input),
         }
     }
 
-    fn out_pin(node: NodeId, output: u64) -> OutPin {
+    fn out_pin(node: Id, output: u64) -> OutPin<Id> {
         OutPin {
             node,
             output: OutputId(output),
         }
     }
 
-    fn wire(from: OutPin, to: InPin) -> Wire {
+    fn wire(from: OutPin<Id>, to: InPin<Id>) -> Wire<Id> {
         Wire { from, to }
     }
 
-    fn wire_set(wires: &[Wire]) -> HashSet<Wire> {
+    fn wire_set(wires: &[Wire<Id>]) -> HashSet<Wire<Id>> {
         wires.iter().copied().collect()
     }
 
-    #[test]
-    fn a_removed_node_id_is_never_handed_out_again() {
-        let mut graph = Graph::new();
-        let first = graph.add_node("a", pos2(0.0, 0.0));
-        graph.remove_node(first);
-        let second = graph.add_node("b", pos2(0.0, 0.0));
-
-        assert_ne!(first, second);
-        assert!(graph.node(first).is_none());
-        assert_eq!(graph.node(second).map(|node| node.payload), Some("b"));
+    /// Adds a node under the next sequential id.
+    fn add<N>(graph: &mut Graph<N, Id>, payload: N, pos: Pos2) -> Id {
+        let id = SequentialNodeId(graph.nodes().count() as u64 + 1000);
+        graph.add_node(id, payload, pos).unwrap();
+        id
     }
 
     #[test]
-    fn restoring_an_id_keeps_later_ids_above_it() {
+    fn adding_a_node_under_an_existing_id_changes_nothing() {
         let mut graph = Graph::new();
-        assert_eq!(
-            graph.add_node_with_id(NodeId(100), "restored", pos2(0.0, 0.0)),
-            Ok(())
-        );
-        let minted = graph.add_node("fresh", pos2(0.0, 0.0));
-        assert!(minted > NodeId(100));
-        assert_eq!(
-            graph.add_node_with_id(NodeId(100), "again", pos2(0.0, 0.0)),
-            Err(IdInUse(NodeId(100)))
-        );
+        let id = SequentialNodeId(7);
+        assert_eq!(graph.add_node(id, "a", pos2(0.0, 0.0)), Ok(()));
+        assert_eq!(graph.add_node(id, "b", pos2(1.0, 1.0)), Err(IdInUse(id)));
+        assert_eq!(graph.node(id).map(|node| node.payload), Some("a"));
     }
 
     #[test]
-    fn a_single_input_displaces_its_previous_wire() {
+    fn connecting_just_adds_a_wire_whatever_is_already_on_the_input() {
         let mut graph = Graph::new();
-        let x = graph.add_node("x", pos2(0.0, 0.0));
-        let y = graph.add_node("y", pos2(0.0, 0.0));
-        let target = graph.add_node("target", pos2(0.0, 0.0));
+        let x = add(&mut graph, "x", pos2(0.0, 0.0));
+        let y = add(&mut graph, "y", pos2(0.0, 0.0));
+        let target = add(&mut graph, "target", pos2(0.0, 0.0));
         let input = in_pin(target, 0);
 
-        graph
-            .connect(out_pin(x, 0), input, ConnectionPolicy::Single)
-            .unwrap();
-        let outcome = graph
-            .connect(out_pin(y, 0), input, ConnectionPolicy::Single)
-            .unwrap();
-
         assert_eq!(
-            outcome,
-            Connected::New {
-                displaced: vec![wire(out_pin(x, 0), input)]
-            }
+            graph.connect(wire(out_pin(x, 0), input)),
+            Ok(Connected::New)
         );
         assert_eq!(
-            graph.sources_of(input).collect::<Vec<_>>(),
-            vec![out_pin(y, 0)]
+            graph.connect(wire(out_pin(y, 0), input)),
+            Ok(Connected::New)
         );
-    }
-
-    #[test]
-    fn a_multiple_input_keeps_every_wire() {
-        let mut graph = Graph::new();
-        let x = graph.add_node("x", pos2(0.0, 0.0));
-        let y = graph.add_node("y", pos2(0.0, 0.0));
-        let target = graph.add_node("target", pos2(0.0, 0.0));
-        let input = in_pin(target, 0);
-
-        graph
-            .connect(out_pin(x, 0), input, ConnectionPolicy::Multiple)
-            .unwrap();
-        let outcome = graph
-            .connect(out_pin(y, 0), input, ConnectionPolicy::Multiple)
-            .unwrap();
-
-        assert_eq!(outcome, Connected::New { displaced: vec![] });
         assert_eq!(graph.sources_of(input).count(), 2);
+    }
+
+    #[test]
+    fn displacing_a_single_input_removes_and_returns_its_wires() {
+        let mut graph = Graph::new();
+        let x = add(&mut graph, "x", pos2(0.0, 0.0));
+        let target = add(&mut graph, "target", pos2(0.0, 0.0));
+        let input = in_pin(target, 0);
+        graph.connect(wire(out_pin(x, 0), input)).unwrap();
+
+        assert_eq!(
+            graph.displace(input, ConnectionPolicy::Single),
+            vec![wire(out_pin(x, 0), input)]
+        );
+        assert!(graph.wires().is_empty());
+        assert!(graph.displace(input, ConnectionPolicy::Multiple).is_empty());
     }
 
     #[test]
     fn connecting_the_same_wire_twice_changes_nothing() {
         let mut graph = Graph::new();
-        let a = graph.add_node("a", pos2(0.0, 0.0));
-        let b = graph.add_node("b", pos2(0.0, 0.0));
+        let a = add(&mut graph, "a", pos2(0.0, 0.0));
+        let b = add(&mut graph, "b", pos2(0.0, 0.0));
 
-        graph
-            .connect(out_pin(a, 0), in_pin(b, 0), ConnectionPolicy::Single)
-            .unwrap();
+        graph.connect(wire(out_pin(a, 0), in_pin(b, 0))).unwrap();
         let revision = graph.topology_revision();
-        let outcome = graph
-            .connect(out_pin(a, 0), in_pin(b, 0), ConnectionPolicy::Single)
-            .unwrap();
+        let outcome = graph.connect(wire(out_pin(a, 0), in_pin(b, 0))).unwrap();
 
         assert_eq!(outcome, Connected::AlreadyExisted);
         assert_eq!(graph.wires().len(), 1);
@@ -368,45 +353,33 @@ mod tests {
     #[test]
     fn connecting_to_a_missing_node_is_an_error() {
         let mut graph = Graph::new();
-        let a = graph.add_node("a", pos2(0.0, 0.0));
-        let gone = graph.add_node("gone", pos2(0.0, 0.0));
+        let a = add(&mut graph, "a", pos2(0.0, 0.0));
+        let gone = add(&mut graph, "gone", pos2(0.0, 0.0));
         graph.remove_node(gone);
 
         assert_eq!(
-            graph.connect(out_pin(a, 0), in_pin(gone, 0), ConnectionPolicy::Single),
+            graph.connect(wire(out_pin(a, 0), in_pin(gone, 0))),
             Err(UnknownNode(gone))
         );
         assert!(graph.wires().is_empty());
     }
 
     /// The contract undo relies on: what `remove_node` hands back, fed to
-    /// `add_node_with_id` and `connect`, rebuilds the graph exactly.
+    /// `add_node` and `connect`, rebuilds the graph exactly.
     #[test]
     fn a_removed_node_can_be_put_back_exactly() {
         let mut graph = Graph::new();
-        let upstream = graph.add_node("upstream", pos2(0.0, 0.0));
-        let middle = graph.add_node("middle", pos2(10.0, 20.0));
-        let downstream = graph.add_node("downstream", pos2(0.0, 0.0));
+        let upstream = add(&mut graph, "upstream", pos2(0.0, 0.0));
+        let middle = add(&mut graph, "middle", pos2(10.0, 20.0));
+        let downstream = add(&mut graph, "downstream", pos2(0.0, 0.0));
         graph
-            .connect(
-                out_pin(upstream, 0),
-                in_pin(middle, 0),
-                ConnectionPolicy::Single,
-            )
+            .connect(wire(out_pin(upstream, 0), in_pin(middle, 0)))
             .unwrap();
         graph
-            .connect(
-                out_pin(middle, 0),
-                in_pin(downstream, 0),
-                ConnectionPolicy::Single,
-            )
+            .connect(wire(out_pin(middle, 0), in_pin(downstream, 0)))
             .unwrap();
         graph
-            .connect(
-                out_pin(middle, 1),
-                in_pin(downstream, 1),
-                ConnectionPolicy::Single,
-            )
+            .connect(wire(out_pin(middle, 1), in_pin(downstream, 1)))
             .unwrap();
         let before = wire_set(graph.wires());
 
@@ -418,12 +391,10 @@ mod tests {
         assert!(graph.remove_node(middle).is_none(), "already gone");
 
         graph
-            .add_node_with_id(middle, removed.node.payload, removed.node.pos)
+            .add_node(middle, removed.node.payload, removed.node.pos)
             .unwrap();
         for wire in removed.wires {
-            graph
-                .connect(wire.from, wire.to, ConnectionPolicy::Multiple)
-                .unwrap();
+            graph.connect(wire).unwrap();
         }
         assert_eq!(wire_set(graph.wires()), before);
     }
@@ -431,12 +402,10 @@ mod tests {
     #[test]
     fn disconnecting_reports_whether_the_wire_existed() {
         let mut graph = Graph::new();
-        let a = graph.add_node("a", pos2(0.0, 0.0));
-        let b = graph.add_node("b", pos2(0.0, 0.0));
+        let a = add(&mut graph, "a", pos2(0.0, 0.0));
+        let b = add(&mut graph, "b", pos2(0.0, 0.0));
         let ab = wire(out_pin(a, 0), in_pin(b, 0));
-        graph
-            .connect(ab.from, ab.to, ConnectionPolicy::Single)
-            .unwrap();
+        graph.connect(ab).unwrap();
 
         assert!(graph.disconnect(ab));
         assert!(graph.wires().is_empty());
@@ -448,8 +417,8 @@ mod tests {
     #[test]
     fn moving_a_node_bumps_layout_but_not_topology() {
         let mut graph = Graph::new();
-        let a = graph.add_node("a", pos2(0.0, 0.0));
-        let b = graph.add_node("b", pos2(0.0, 0.0));
+        let a = add(&mut graph, "a", pos2(0.0, 0.0));
+        let b = add(&mut graph, "b", pos2(0.0, 0.0));
         let (topology, layout) = (graph.topology_revision(), graph.layout_revision());
 
         assert_eq!(graph.set_pos(a, pos2(5.0, 5.0)), Some(pos2(0.0, 0.0)));
@@ -457,9 +426,7 @@ mod tests {
         assert_ne!(graph.layout_revision(), layout);
 
         let layout = graph.layout_revision();
-        graph
-            .connect(out_pin(a, 0), in_pin(b, 0), ConnectionPolicy::Single)
-            .unwrap();
+        graph.connect(wire(out_pin(a, 0), in_pin(b, 0))).unwrap();
         assert_ne!(graph.topology_revision(), topology);
         assert_eq!(graph.layout_revision(), layout);
     }
@@ -467,13 +434,11 @@ mod tests {
     #[test]
     fn a_node_can_be_spliced_into_a_wire() {
         let mut graph = Graph::new();
-        let a = graph.add_node("a", pos2(0.0, 0.0));
-        let c = graph.add_node("c", pos2(0.0, 0.0));
+        let a = add(&mut graph, "a", pos2(0.0, 0.0));
+        let c = add(&mut graph, "c", pos2(0.0, 0.0));
         let ac = wire(out_pin(a, 0), in_pin(c, 0));
-        graph
-            .connect(ac.from, ac.to, ConnectionPolicy::Single)
-            .unwrap();
-        let b = graph.add_node("b", pos2(0.0, 0.0));
+        graph.connect(ac).unwrap();
+        let b = add(&mut graph, "b", pos2(0.0, 0.0));
 
         let outcome = graph
             .insert_into_wire(ac, b, InputId(7), ConnectionPolicy::Single, OutputId(3))
@@ -492,9 +457,9 @@ mod tests {
     #[test]
     fn splicing_into_a_wire_that_no_longer_exists_changes_nothing() {
         let mut graph = Graph::new();
-        let a = graph.add_node("a", pos2(0.0, 0.0));
-        let b = graph.add_node("b", pos2(0.0, 0.0));
-        let c = graph.add_node("c", pos2(0.0, 0.0));
+        let a = add(&mut graph, "a", pos2(0.0, 0.0));
+        let b = add(&mut graph, "b", pos2(0.0, 0.0));
+        let c = add(&mut graph, "c", pos2(0.0, 0.0));
         let never_connected = wire(out_pin(a, 0), in_pin(c, 0));
 
         let outcome = graph.insert_into_wire(

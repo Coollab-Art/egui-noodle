@@ -1,18 +1,24 @@
-use crate::{ConnectionPolicy, InputId, NodeId, OutputId};
+use crate::{ConnectionPolicy, InputId, NodeIdentifier, OutputId};
 use egui::{Color32, Ui};
 
-/// How the application draws its nodes. Content only: it never sees the
-/// graph, so nothing it does can invalidate the layout mid-frame. Anything
-/// that should change the graph is reported back through the canvas's events
-/// and applied by the application afterwards.
+/// How the application draws its nodes. Content only: it sees each node's
+/// payload **read-only** and never the graph, so nothing it does can change
+/// the model or invalidate the layout mid-frame. Anything a body wants to
+/// change - a value edited in a widget, a card clicked - it reports to the
+/// application through whatever channel the implementing type carries (a
+/// command queue, say), and the application applies it afterwards, exactly
+/// as it applies the canvas's own events. Why read-only: `6-Application Owns
+/// Identity.md`.
 ///
 /// The `Ui` handed to each method is inside the node's frame, with its style
 /// pre-scaled so text stays crisp when zoomed in: sizes read from the `Ui`
 /// (`ui.spacing()`, text styles) are right as they are, and a hard-coded size
 /// must be multiplied by [`content_scale`](super::content_scale).
 pub trait NodeContent {
-    /// What the application stores per node - `Graph<Self::Node>`.
+    /// What the application stores per node - `Graph<Self::Node, Self::Id>`.
     type Node;
+    /// How the application identifies a node.
+    type Id: NodeIdentifier;
 
     fn inputs(&mut self, node: &Self::Node) -> Vec<InputSpec>;
     fn outputs(&mut self, node: &Self::Node) -> Vec<OutputSpec>;
@@ -28,14 +34,14 @@ pub trait NodeContent {
 
     /// The header row. Defaults to the title as a non-selectable label - a
     /// selectable one would swallow the drag that moves the node.
-    fn header(&mut self, ui: &mut Ui, id: NodeId, node: &mut Self::Node) {
+    fn header(&mut self, ui: &mut Ui, id: Self::Id, node: &Self::Node) {
         let _ = id;
         let title = self.title(node);
         ui.add(egui::Label::new(title).selectable(false));
     }
 
     /// Between the input and output pin columns. Defaults to nothing.
-    fn body(&mut self, ui: &mut Ui, id: NodeId, node: &mut Self::Node) {
+    fn body(&mut self, ui: &mut Ui, id: Self::Id, node: &Self::Node) {
         let _ = (ui, id, node);
     }
 
