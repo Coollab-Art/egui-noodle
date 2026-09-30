@@ -22,3 +22,5 @@ serde = ["dep:serde", "egui/serde"]
 
 [dev-dependencies]
 eframe = "0.36"
+# Drives the canvas headlessly in `tests/`, with real pointer input.
+egui_kittest = "0.36"

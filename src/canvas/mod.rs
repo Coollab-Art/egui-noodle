@@ -241,9 +241,18 @@ impl<I: NodeIdentifier> Canvas<I> {
         let modifiers = canvas_ui.input(|input| input.modifiers);
         let (frames, pins) =
             self.register_interactors(&mut nodes_ui, graph, modifiers, content_scale, style);
-        let pointer = canvas_ui
-            .input(|input| input.pointer.latest_pos())
-            .map(|pointer| to_global.inverse() * pointer);
+        let (pointer, press_origin) = canvas_ui.input(|input| {
+            (
+                input
+                    .pointer
+                    .latest_pos()
+                    .map(|pos| to_global.inverse() * pos),
+                input
+                    .pointer
+                    .press_origin()
+                    .map(|pos| to_global.inverse() * pos),
+            )
+        });
         self.update_hovered(pointer, over_canvas, style);
         let insert_button = self
             .hovered
@@ -268,6 +277,7 @@ impl<I: NodeIdentifier> Canvas<I> {
                 insert_button: insert_button.as_ref(),
                 background: &background,
                 pointer,
+                press_origin,
                 modifiers,
             },
             style,

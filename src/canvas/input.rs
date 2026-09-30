@@ -106,6 +106,7 @@ impl<I: NodeIdentifier> Canvas<I> {
             pins,
             insert_button,
             pointer,
+            press_origin,
             modifiers,
             ..
         } = interaction;
@@ -124,8 +125,8 @@ impl<I: NodeIdentifier> Canvas<I> {
                     self.select_only(*id);
                 }
                 self.raise(*id);
-                if let Some(pointer) = pointer {
-                    self.gesture = self.begin_node_drag(graph, *id, pointer);
+                if let Some(grabbed) = press_origin.or(pointer) {
+                    self.gesture = self.begin_node_drag(graph, *id, grabbed);
                 }
             }
         }
@@ -272,6 +273,7 @@ impl<I: NodeIdentifier> Canvas<I> {
         let Interaction {
             background,
             pointer,
+            press_origin,
             modifiers,
             ..
         } = interaction;
@@ -279,17 +281,18 @@ impl<I: NodeIdentifier> Canvas<I> {
         if background.drag_started_by(PointerButton::Primary)
             && let Some(pointer) = pointer
         {
+            let start = press_origin.unwrap_or(pointer);
             // Under the command modifier node frames only sense clicks, so this
             // drag reaches the background even when it began over a node.
             self.gesture = if modifiers.command {
                 Gesture::Cutting {
-                    stroke: vec![pointer],
+                    stroke: vec![start, pointer],
                     wires: Vec::new(),
                     nodes: Vec::new(),
                 }
             } else {
                 Gesture::BoxSelecting {
-                    start: pointer,
+                    start,
                     current: pointer,
                     preview: Selection::default(),
                 }

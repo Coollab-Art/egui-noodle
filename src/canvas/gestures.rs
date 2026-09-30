@@ -131,6 +131,10 @@ pub(super) struct Interaction<'a, I> {
     pub background: &'a Response,
     /// Graph space.
     pub pointer: Option<Pos2>,
+    /// Graph space: where the button went down. A drag starts only once the
+    /// pointer has moved some way from there, so a gesture anchored where it
+    /// starts is anchored here, not at `pointer`.
+    pub press_origin: Option<Pos2>,
     pub modifiers: Modifiers,
 }
 
